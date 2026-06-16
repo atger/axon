@@ -84,6 +84,11 @@ pub struct Args {
     /// Override context window size (tokens)
     #[arg(long)]
     pub context_window: Option<usize>,
+
+    /// Run with a skill by name (from ~/.axon/skills/) or GitHub URL.
+    /// If a URL is given, the skill is downloaded and saved before the session starts.
+    #[arg(long)]
+    pub skill: Option<String>,
 }
 
 #[derive(ValueEnum, Clone, Debug)]

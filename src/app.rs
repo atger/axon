@@ -76,8 +76,9 @@ impl<'a> App<'a> {
         ollama_url: String,
         no_download: bool,
         context_window: Option<usize>,
+        skill_content: Option<String>,
     ) -> Self {
-        let context = ContextProvider::new();
+        let context = ContextProvider::new(skill_content);
         let cw = context_window.unwrap_or_else(|| backend.context_window());
         Self {
             running: true,
@@ -619,6 +620,7 @@ pub async fn run_tui(
     ollama_url: String,
     no_download: bool,
     context_window: Option<usize>,
+    skill_content: Option<String>,
 ) -> color_eyre::Result<()> {
     let mut terminal = ratatui::init();
     let (tx, rx) = mpsc::channel(64);
@@ -628,6 +630,7 @@ pub async fn run_tui(
         ollama_url,
         no_download,
         context_window,
+        skill_content,
     )
     .run(&mut terminal, tx, rx)
     .await;

@@ -12,6 +12,7 @@ mod daemon;
 mod llm;
 mod runner;
 mod session;
+mod skills;
 mod tools;
 mod ui;
 
@@ -68,8 +69,17 @@ async fn main() -> color_eyre::Result<()> {
         BackendKind::Ollama => Arc::new(OllamaBackend::new(&ollama_url, &model)),
     };
 
+    // Resolve skill (download if URL, find locally if name).
+    let skill_content: Option<String> = if let Some(ref s) = args.skill {
+        let skill = skills::resolve_skill(s)?;
+        eprintln!("Using skill: {} — {}", skill.name, skill.description);
+        Some(skill.content)
+    } else {
+        None
+    };
+
     match args.prompt.clone() {
-        Some(p) => runner::run_once(p, backend, args.context_window).await,
+        Some(p) => runner::run_once(p, backend, args.context_window, skill_content).await,
         None => {
             app::run_tui(
                 backend,
@@ -77,6 +87,7 @@ async fn main() -> color_eyre::Result<()> {
                 ollama_url,
                 no_download,
                 args.context_window,
+                skill_content,
             )
             .await
         }
