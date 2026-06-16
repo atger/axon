@@ -23,6 +23,8 @@ tui-textarea = "0.7.0"
 llama-cpp-2 = "0.1"
 hf-hub = "0.3"
 encoding_rs = "0.8"
+toml = "0.8"
+ureq = { version = "2", features = ["json"] }
 
 # https://ratatui.rs/recipes/apps/release-your-app/#optimizations
 [profile.release]
