@@ -39,10 +39,9 @@ impl Backend for DaemonBackend {
 
         let (read_half, mut write_half) = conn.into_split();
 
-        let req = DaemonRequest {
+        let _ = options;
+        let req = DaemonRequest::Infer {
             messages: messages.to_vec(),
-            model_name: self.name.clone(),
-            grammar: options.grammar.clone(),
         };
         let mut req_line =
             serde_json::to_string(&req).map_err(|e| BackendError::Inference(e.to_string()))?;

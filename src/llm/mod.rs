@@ -16,11 +16,7 @@ pub struct StreamEvent {
 
 /// Per-request inference options passed through all backend implementations.
 #[derive(Default, Clone)]
-pub struct InferOptions {
-    /// GBNF grammar string; when set, the local backend constrains sampling to
-    /// tokens that keep the output valid according to the grammar.
-    pub grammar: Option<String>,
-}
+pub struct InferOptions {}
 
 #[derive(thiserror::Error, Debug)]
 pub enum BackendError {

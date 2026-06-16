@@ -2,8 +2,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use color_eyre::eyre::{self, WrapErr};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
+use super::proto::{DaemonRequest, DaemonResponse};
 use super::{axon_log_file, axon_model_file, axon_pid_file, axon_port_file};
 
 pub(crate) fn try_read_port(port_file: &PathBuf) -> Option<u16> {
@@ -34,6 +36,30 @@ pub(crate) fn pid_is_alive(pid: u32) -> bool {
         let _ = pid;
         false
     }
+}
+
+/// Downloads the model file to the HuggingFace cache in the CLI process so
+/// that the progress bar is visible on the TTY and errors surface immediately.
+/// No-op if the file is already cached, the model has no HF file, or
+/// `no_download` is set.
+async fn ensure_model_downloaded(name: &str, no_download: bool) -> color_eyre::Result<()> {
+    let (hf_repo, hf_file, _) = crate::llm::local::resolve_model(name);
+    if hf_file.is_empty() || no_download {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(move || {
+        let api = hf_hub::api::sync::ApiBuilder::new()
+            .with_progress(true)
+            .build()
+            .map_err(|e| color_eyre::eyre::eyre!("HuggingFace API error: {e}"))?;
+        api.model(hf_repo)
+            .get(&hf_file)
+            .map_err(|e| color_eyre::eyre::eyre!("failed to download model: {e}"))?;
+        Ok::<(), color_eyre::eyre::Error>(())
+    })
+    .await
+    .wrap_err("download task panicked")??;
+    Ok(())
 }
 
 fn spawn_daemon(model: &str, no_download: bool, cw: Option<usize>) -> color_eyre::Result<()> {
@@ -81,6 +107,40 @@ pub fn invalidate_daemon() -> color_eyre::Result<()> {
     Ok(())
 }
 
+/// Sends a `SwitchModel` request to the running daemon and waits for the ack.
+/// This blocks until the new model is fully loaded (may include downloading).
+async fn switch_model_request(port: u16, model: &str, no_download: bool) -> color_eyre::Result<()> {
+    eprintln!("axon: switching to model '{model}'…");
+    let conn = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .wrap_err("cannot connect to daemon for model switch")?;
+    let (read_half, mut write_half) = conn.into_split();
+
+    let req = DaemonRequest::SwitchModel {
+        model: model.to_string(),
+        no_download,
+    };
+    let mut line = serde_json::to_string(&req).wrap_err("failed to serialize switch request")?;
+    line.push('\n');
+    write_half
+        .write_all(line.as_bytes())
+        .await
+        .wrap_err("failed to send switch request")?;
+
+    let mut reader = BufReader::new(read_half);
+    let mut buf = String::new();
+    reader
+        .read_line(&mut buf)
+        .await
+        .wrap_err("failed to read switch response")?;
+    let resp: DaemonResponse =
+        serde_json::from_str(buf.trim()).wrap_err("bad response to switch request")?;
+    if let Some(err) = resp.error {
+        eyre::bail!("model switch failed: {err}");
+    }
+    Ok(())
+}
+
 /// Connects to the running daemon and returns its port, or spawns a new daemon
 /// and waits up to 10 minutes for it to become ready (model loading can be slow,
 /// especially in debug builds).
@@ -96,8 +156,28 @@ pub async fn ensure_daemon_running(
     if let Some(port) = try_read_port(&port_file)
         && TcpStream::connect(("127.0.0.1", port)).await.is_ok()
     {
-        return Ok(port);
+        // Check whether it's serving the right model; hot-swap if not.
+        let running = std::fs::read_to_string(axon_model_file()?).unwrap_or_default();
+        if running.trim() == model {
+            return Ok(port);
+        }
+        ensure_model_downloaded(model, no_download).await?;
+        match switch_model_request(port, model, true).await {
+            Ok(()) => return Ok(port),
+            Err(e) if e.to_string().contains("invalid request JSON") => {
+                // The running daemon was built with an older binary and doesn't
+                // understand the SwitchModel protocol — kill it and respawn.
+                eprintln!("axon: daemon protocol mismatch, restarting…");
+                invalidate_daemon()?;
+                // fall through to the spawn path below
+            }
+            Err(e) => return Err(e),
+        }
     }
+
+    // Always download first (shows progress bar on TTY, errors early on failure).
+    // This is a no-op if the file is already cached or no_download is set.
+    ensure_model_downloaded(model, no_download).await?;
 
     // Check whether a daemon is already loading the model (PID file present + alive).
     // If so, skip spawning a second one — just wait for the port file to appear.
@@ -105,7 +185,7 @@ pub async fn ensure_daemon_running(
     if !already_loading {
         let _ = std::fs::remove_file(&port_file);
         let _ = std::fs::remove_file(&pid_file);
-        spawn_daemon(model, no_download, cw)?;
+        spawn_daemon(model, true, cw)?;
         eprintln!(
             "axon: daemon spawned — loading model '{model}' (log: {})",
             axon_log_file()
@@ -129,6 +209,25 @@ pub async fn ensure_daemon_running(
             && TcpStream::connect(("127.0.0.1", port)).await.is_ok()
         {
             return Ok(port);
+        }
+
+        // Detect daemon death early rather than waiting for the full 10-min timeout.
+        if try_read_pid(&pid_file).is_none_or(|pid| !pid_is_alive(pid)) {
+            // Clean up stale files so the next invocation starts fresh automatically.
+            let _ = std::fs::remove_file(&port_file);
+            let _ = std::fs::remove_file(&pid_file);
+            let _ = std::fs::remove_file(axon_model_file().unwrap_or_default());
+            let log_tail = std::fs::read_to_string(axon_log_file()?).unwrap_or_default();
+            let tail: String = log_tail
+                .lines()
+                .rev()
+                .take(10)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            eyre::bail!("axon daemon exited unexpectedly:\n{tail}");
         }
 
         if last_progress.elapsed() >= Duration::from_secs(15) {

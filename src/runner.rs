@@ -3,7 +3,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use crate::cli::Args;
 use crate::context::ContextProvider;
 use crate::llm::{Backend, InferOptions};
 use crate::session::{ConversationHistory, Message};
@@ -11,12 +10,10 @@ use crate::session::{ConversationHistory, Message};
 pub async fn run_once(
     prompt: String,
     backend: Arc<dyn Backend>,
-    args: &Args,
+    context_window: Option<usize>,
 ) -> color_eyre::Result<()> {
     let ctx = ContextProvider::new();
-    let cw = args
-        .context_window
-        .unwrap_or_else(|| backend.context_window());
+    let cw = context_window.unwrap_or_else(|| backend.context_window());
     let mut history = ConversationHistory::new(cw);
     history.push(Message::user(prompt));
 

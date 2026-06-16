@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{AgentLoop, ConfirmFn};
-use crate::cli::{Args, BackendKind};
+use crate::cli::BackendKind;
 use crate::context::ContextProvider;
 use crate::llm::{Backend, StreamEvent, daemon::DaemonBackend, ollama::OllamaBackend};
 use crate::session::{ConversationHistory, Message};
@@ -70,18 +70,22 @@ pub struct App<'a> {
 }
 
 impl<'a> App<'a> {
-    fn new(backend: Arc<dyn Backend>, args: &Args) -> Self {
+    fn new(
+        backend: Arc<dyn Backend>,
+        backend_kind: BackendKind,
+        ollama_url: String,
+        no_download: bool,
+        context_window: Option<usize>,
+    ) -> Self {
         let context = ContextProvider::new();
-        let cw = args
-            .context_window
-            .unwrap_or_else(|| backend.context_window());
+        let cw = context_window.unwrap_or_else(|| backend.context_window());
         Self {
             running: true,
             session: ConversationHistory::new(cw),
             backend,
-            backend_kind: args.backend.clone(),
-            ollama_url: args.ollama_url.clone(),
-            no_download: args.no_download,
+            backend_kind,
+            ollama_url,
+            no_download,
             context,
             tools: Arc::new(ToolRegistry::with_defaults()),
             chat: ChatWidget::new(),
@@ -443,9 +447,6 @@ impl<'a> App<'a> {
                         BackendKind::Ollama => Arc::new(OllamaBackend::new(&self.ollama_url, name)),
                         BackendKind::Local => {
                             self.connecting = true;
-                            crate::daemon::ensure::invalidate_daemon()?;
-                            // Brief wait so the old daemon detects the stale port file.
-                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                             match crate::daemon::ensure::ensure_daemon_running(
                                 name,
                                 self.no_download,
@@ -473,6 +474,9 @@ impl<'a> App<'a> {
                     self.session.set_context_window(cw);
                     self.session
                         .push(Message::assistant(format!("Switched to model `{name}`.")));
+                    let mut cfg = crate::config::AxonConfig::load();
+                    cfg.model = Some(name.to_string());
+                    let _ = cfg.save();
                 } else {
                     self.session.push(Message::assistant(format!(
                         "Current model: `{}`\nUsage: /model <name>",
@@ -609,10 +613,24 @@ fn render_confirm_overlay(frame: &mut Frame, area: Rect, tool_name: &str, args_s
     );
 }
 
-pub async fn run_tui(backend: Arc<dyn Backend>, args: &Args) -> color_eyre::Result<()> {
+pub async fn run_tui(
+    backend: Arc<dyn Backend>,
+    backend_kind: BackendKind,
+    ollama_url: String,
+    no_download: bool,
+    context_window: Option<usize>,
+) -> color_eyre::Result<()> {
     let mut terminal = ratatui::init();
     let (tx, rx) = mpsc::channel(64);
-    let result = App::new(backend, args).run(&mut terminal, tx, rx).await;
+    let result = App::new(
+        backend,
+        backend_kind,
+        ollama_url,
+        no_download,
+        context_window,
+    )
+    .run(&mut terminal, tx, rx)
+    .await;
     ratatui::restore();
     result
 }
