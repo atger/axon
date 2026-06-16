@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
@@ -16,9 +17,21 @@ use crate::session::{Message, Role};
 
 use super::{Backend, BackendError, StreamEvent};
 
-struct ModelInner {
-    backend: LlamaBackend,
-    model: LlamaModel,
+struct InferenceJob {
+    messages: Vec<Message>,
+    cancel: CancellationToken,
+    tx: mpsc::Sender<StreamEvent>,
+}
+
+// Held by LocalBackend — a sender to the persistent inference thread.
+struct ModelHandle {
+    job_tx: std::sync::mpsc::Sender<InferenceJob>,
+}
+
+// Tracks the system-prompt portion already decoded into the KV cache.
+struct PrefixCache {
+    system_key: String, // hash of the system message content
+    prefix_len: i32,    // token count of the cached prefix
 }
 
 pub struct LocalBackend {
@@ -27,7 +40,7 @@ pub struct LocalBackend {
     hf_file: String,
     cw: usize,
     no_download: bool,
-    inner: OnceCell<Arc<ModelInner>>,
+    handle: OnceCell<Arc<ModelHandle>>,
 }
 
 impl LocalBackend {
@@ -40,18 +53,19 @@ impl LocalBackend {
             hf_file,
             cw,
             no_download,
-            inner: OnceCell::new(),
+            handle: OnceCell::new(),
         }
     }
 
-    async fn get_inner(&self) -> Result<Arc<ModelInner>, BackendError> {
-        self.inner
+    async fn get_handle(&self) -> Result<Arc<ModelHandle>, BackendError> {
+        self.handle
             .get_or_try_init(|| async {
                 let hf_repo = self.hf_repo.clone();
                 let hf_file = self.hf_file.clone();
                 let no_download = self.no_download;
+                let cw = self.cw;
                 tokio::task::spawn_blocking(move || {
-                    load_model_inner(&hf_repo, &hf_file, no_download)
+                    start_inference_thread(&hf_repo, &hf_file, no_download, cw)
                 })
                 .await
                 .map_err(|e| BackendError::Unavailable(e.to_string()))?
@@ -60,19 +74,18 @@ impl LocalBackend {
             .cloned()
     }
 
-    /// Forces model load before the daemon binds its port (the readiness signal).
+    /// Forces model load and context creation before the daemon binds its port.
     pub async fn warm_up(&self) -> Result<(), BackendError> {
-        self.get_inner().await.map(|_| ())
+        self.get_handle().await.map(|_| ())
     }
 }
 
-fn load_model_inner(
+fn load_model(
     hf_repo: &str,
     hf_file: &str,
     no_download: bool,
-) -> Result<Arc<ModelInner>, BackendError> {
+) -> Result<(LlamaBackend, LlamaModel), BackendError> {
     let model_path: PathBuf = if hf_file.is_empty() {
-        // Local .gguf path or bare HF repo ID with no file — use as-is.
         PathBuf::from(hf_repo)
     } else {
         if no_download {
@@ -97,7 +110,73 @@ fn load_model_inner(
     let model = LlamaModel::load_from_file(&backend, &model_path, &LlamaModelParams::default())
         .map_err(|e| BackendError::Unavailable(e.to_string()))?;
 
-    Ok(Arc::new(ModelInner { backend, model }))
+    Ok((backend, model))
+}
+
+/// Loads the model, creates the KV-cache context once, then loops receiving
+/// inference jobs. The context is reused across requests with prefix caching.
+///
+/// LlamaContext is !Send, so it must be created on the thread that uses it.
+fn start_inference_thread(
+    hf_repo: &str,
+    hf_file: &str,
+    no_download: bool,
+    cw: usize,
+) -> Result<Arc<ModelHandle>, BackendError> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), BackendError>>();
+    let (job_tx, job_rx) = std::sync::mpsc::channel::<InferenceJob>();
+
+    let hf_repo = hf_repo.to_string();
+    let hf_file = hf_file.to_string();
+
+    std::thread::spawn(move || {
+        let (backend, model) = match load_model(&hf_repo, &hf_file, no_download) {
+            Ok(x) => x,
+            Err(e) => {
+                let _ = ready_tx.send(Err(e));
+                return;
+            }
+        };
+
+        let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(cw as u32));
+        let mut ctx = match model.new_context(&backend, ctx_params) {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = ready_tx.send(Err(BackendError::Unavailable(e.to_string())));
+                return;
+            }
+        };
+
+        let template = match model.chat_template(None) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = ready_tx.send(Err(BackendError::Unavailable(e.to_string())));
+                return;
+            }
+        };
+
+        let _ = ready_tx.send(Ok(()));
+
+        // ctx borrows model; Rust drops ctx before model (reverse declaration order).
+        let mut prefix_cache: Option<PrefixCache> = None;
+        while let Ok(job) = job_rx.recv() {
+            if let Err(e) = run_with_prefix_cache(&template, &mut ctx, &job, cw, &mut prefix_cache)
+            {
+                eprintln!("axon-daemon: inference error: {e}");
+            }
+            let _ = job.tx.blocking_send(StreamEvent {
+                delta: String::new(),
+                done: true,
+            });
+        }
+    });
+
+    ready_rx
+        .recv()
+        .map_err(|_| BackendError::Unavailable("inference thread exited before ready".into()))
+        .and_then(|r| r)?;
+
+    Ok(Arc::new(ModelHandle { job_tx }))
 }
 
 #[async_trait]
@@ -108,13 +187,18 @@ impl Backend for LocalBackend {
         cancel: CancellationToken,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<(), BackendError> {
-        let inner = self.get_inner().await?;
-        let messages = messages.to_vec();
-        let cw = self.cw;
-
-        tokio::task::spawn_blocking(move || run_inference(&inner, &messages, cw, &cancel, &tx))
-            .await
-            .map_err(|e| BackendError::Inference(e.to_string()))?
+        let handle = self.get_handle().await?;
+        let job = InferenceJob {
+            messages: messages.to_vec(),
+            cancel,
+            tx,
+        };
+        // Unbounded channel — send never blocks. The daemon's Semaphore(1) ensures
+        // only one job is in flight at a time.
+        handle
+            .job_tx
+            .send(job)
+            .map_err(|_| BackendError::Unavailable("inference thread closed".into()))
     }
 
     fn model_name(&self) -> &str {
@@ -126,21 +210,9 @@ impl Backend for LocalBackend {
     }
 }
 
-fn run_inference(
-    inner: &ModelInner,
-    messages: &[Message],
-    cw: usize,
-    cancel: &CancellationToken,
-    tx: &mpsc::Sender<StreamEvent>,
-) -> Result<(), BackendError> {
-    let model = &inner.model;
-    let backend = &inner.backend;
-
-    let template = model
-        .chat_template(None)
-        .map_err(|e| BackendError::Inference(format!("chat template: {e}")))?;
-
-    let llama_msgs: Vec<LlamaChatMessage> = messages
+/// Converts axon messages to llama-cpp-2 chat messages.
+fn to_llama_msgs(messages: &[Message]) -> Result<Vec<LlamaChatMessage>, BackendError> {
+    messages
         .iter()
         .map(|m| {
             let role = match m.role {
@@ -151,54 +223,128 @@ fn run_inference(
             LlamaChatMessage::new(role.to_string(), m.content.clone())
                 .map_err(|e| BackendError::Inference(format!("message: {e}")))
         })
-        .collect::<Result<_, _>>()?;
+        .collect()
+}
 
-    let prompt = model
-        .apply_chat_template(&template, &llama_msgs, true)
+/// Returns the content of all system messages joined, used as the prefix cache key.
+fn system_key(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .map(|m| m.content.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Computes how many tokens the system-message portion of the chat template occupies.
+/// Returns 0 if the template cannot be applied to system messages alone.
+fn compute_prefix_len(
+    template: &llama_cpp_2::model::LlamaChatTemplate,
+    model: &LlamaModel,
+    messages: &[Message],
+) -> i32 {
+    let sys_msgs: Result<Vec<LlamaChatMessage>, _> = messages
+        .iter()
+        .filter(|m| m.role == Role::System)
+        .map(|m| LlamaChatMessage::new("system".to_string(), m.content.clone()))
+        .collect();
+    let Ok(sys_msgs) = sys_msgs else { return 0 };
+    if sys_msgs.is_empty() {
+        return 0;
+    }
+    let Ok(prefix_text) = model.apply_chat_template(template, &sys_msgs, false) else {
+        return 0;
+    };
+    model
+        .str_to_token(&prefix_text, AddBos::Always)
+        .map(|t| t.len() as i32)
+        .unwrap_or(0)
+}
+
+/// Runs one inference job, reusing the KV-cached system prompt when possible.
+///
+/// Strategy:
+///   - If the system prompt hasn't changed since the last request, the prefix
+///     (system prompt tokens) is already decoded in the KV cache. We only need
+///     to prefill the new user message tokens, cutting prefill time by ~8-10×.
+///   - After generation, we trim the KV cache back to just the prefix so the
+///     next request can reuse it.
+fn run_with_prefix_cache(
+    template: &llama_cpp_2::model::LlamaChatTemplate,
+    ctx: &mut LlamaContext<'_>,
+    job: &InferenceJob,
+    cw: usize,
+    prefix_cache: &mut Option<PrefixCache>,
+) -> Result<(), BackendError> {
+    let model = ctx.model;
+
+    let llama_msgs = to_llama_msgs(&job.messages)?;
+    let full_prompt = model
+        .apply_chat_template(template, &llama_msgs, true)
         .map_err(|e| BackendError::Inference(format!("apply template: {e}")))?;
-
-    let tokens = model
-        .str_to_token(&prompt, AddBos::Always)
+    let all_tokens = model
+        .str_to_token(&full_prompt, AddBos::Always)
         .map_err(|e| BackendError::Inference(e.to_string()))?;
-
-    if tokens.is_empty() {
-        let _ = tx.blocking_send(StreamEvent {
-            delta: String::new(),
-            done: true,
-        });
+    if all_tokens.is_empty() {
         return Ok(());
     }
+    let prompt_len = all_tokens.len() as i32;
 
-    let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(cw as u32));
-    let mut ctx = model
-        .new_context(backend, ctx_params)
-        .map_err(|e| BackendError::Inference(e.to_string()))?;
+    let key = system_key(&job.messages);
+    let prefix_len = compute_prefix_len(template, model, &job.messages);
 
-    let prompt_len = tokens.len() as i32;
-    let mut batch = LlamaBatch::new(tokens.len().max(512), 1);
-    for (i, &token) in (0i32..).zip(tokens.iter()) {
-        batch
-            .add(token, i, &[0], i == prompt_len - 1)
+    let can_reuse = prefix_cache
+        .as_ref()
+        .map(|pc| pc.system_key == key && pc.prefix_len == prefix_len && prefix_len > 0)
+        .unwrap_or(false);
+
+    let decode_start = if can_reuse {
+        // Invalidate only the tokens after the cached prefix (user + assistant turns).
+        let _ = ctx.clear_kv_cache_seq(None, Some(prefix_len as u32), None);
+        prefix_len
+    } else {
+        let _ = ctx.clear_kv_cache_seq(None, None, None);
+        0
+    };
+
+    // Decode only the new portion of the prompt (skip cached prefix tokens).
+    let new_tokens = &all_tokens[decode_start as usize..];
+    if !new_tokens.is_empty() {
+        let mut batch = LlamaBatch::new(new_tokens.len().max(512), 1);
+        for (i, &token) in (0i32..).zip(new_tokens.iter()) {
+            let pos = decode_start + i;
+            batch
+                .add(token, pos, &[0], pos == prompt_len - 1)
+                .map_err(|e| BackendError::Inference(e.to_string()))?;
+        }
+        ctx.decode(&mut batch)
             .map_err(|e| BackendError::Inference(e.to_string()))?;
     }
-    ctx.decode(&mut batch)
-        .map_err(|e| BackendError::Inference(e.to_string()))?;
 
+    // Generation loop — one token at a time.
     let max_new = (cw as i32).saturating_sub(prompt_len);
     let mut n_cur = prompt_len;
     let mut sampler = LlamaSampler::greedy();
     let mut decoder = encoding_rs::UTF_8.new_decoder();
 
-    while n_cur < prompt_len + max_new {
-        if cancel.is_cancelled() {
+    // After the prefill decode, the logits for the last prompt token are at the
+    // final position in the new_tokens batch. For generation steps, the
+    // single-token batch always has one entry at position 0.
+    let mut last_batch_pos = new_tokens.len().saturating_sub(1) as i32;
+
+    'generation: loop {
+        if n_cur >= prompt_len + max_new {
+            break;
+        }
+        if job.cancel.is_cancelled() {
             break;
         }
 
-        let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+        let token = sampler.sample(ctx, last_batch_pos);
         sampler.accept(token);
 
         if model.is_eog_token(token) {
-            break;
+            break 'generation;
         }
 
         let text = model
@@ -206,7 +352,8 @@ fn run_inference(
             .unwrap_or_default();
 
         if !text.is_empty()
-            && tx
+            && job
+                .tx
                 .blocking_send(StreamEvent {
                     delta: text,
                     done: false,
@@ -216,20 +363,28 @@ fn run_inference(
             break;
         }
 
-        batch.clear();
+        let mut batch = LlamaBatch::new(1, 1);
         batch
             .add(token, n_cur, &[0], true)
             .map_err(|e| BackendError::Inference(e.to_string()))?;
-
         n_cur += 1;
         ctx.decode(&mut batch)
             .map_err(|e| BackendError::Inference(e.to_string()))?;
+        last_batch_pos = 0;
     }
 
-    let _ = tx.blocking_send(StreamEvent {
-        delta: String::new(),
-        done: true,
-    });
+    // Trim KV cache back to the prefix so the next request can reuse it.
+    if prefix_len > 0 {
+        let _ = ctx.clear_kv_cache_seq(None, Some(prefix_len as u32), None);
+        *prefix_cache = Some(PrefixCache {
+            system_key: key,
+            prefix_len,
+        });
+    } else {
+        let _ = ctx.clear_kv_cache_seq(None, None, None);
+        *prefix_cache = None;
+    }
+
     Ok(())
 }
 
