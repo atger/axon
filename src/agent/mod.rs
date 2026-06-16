@@ -13,23 +13,17 @@ use crate::tools::ToolRegistry;
 pub type ConfirmFn =
     Box<dyn Fn(String, String) -> BoxFuture<'static, bool> + Send + Sync + 'static>;
 
-/// Drives the tool-calling loop: generates a response (grammar-constrained to
-/// one of two JSON shapes), dispatches tool calls, and repeats until the model
-/// produces a text response or the iteration cap is reached.
+/// Drives the tool-calling loop: generates a response (expected to be one of two
+/// JSON shapes), dispatches tool calls, and repeats until the model produces a
+/// text response or the iteration cap is reached.
 pub struct AgentLoop {
     backend: Arc<dyn Backend>,
     tools: Arc<ToolRegistry>,
-    grammar: String,
 }
 
 impl AgentLoop {
     pub fn new(backend: Arc<dyn Backend>, tools: Arc<ToolRegistry>) -> Self {
-        let grammar = tools.build_grammar();
-        Self {
-            backend,
-            tools,
-            grammar,
-        }
+        Self { backend, tools }
     }
 
     /// Runs the agentic loop.
@@ -47,16 +41,14 @@ impl AgentLoop {
         text_tx: mpsc::Sender<StreamEvent>,
     ) -> Result<(), BackendError> {
         const MAX_ITER: usize = 8;
-        let options = InferOptions {
-            grammar: Some(self.grammar.clone()),
-        };
+        let options = InferOptions::default();
 
         for _ in 0..MAX_ITER {
             if cancel.is_cancelled() {
                 break;
             }
 
-            // Collect the full constrained response into a buffer.
+            // Collect the full response into a buffer.
             let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(256);
             let backend = Arc::clone(&self.backend);
             let msgs = messages.clone();
@@ -83,11 +75,11 @@ impl AgentLoop {
                 break;
             }
 
-            // Parse the grammar-constrained JSON response.
-            let response: serde_json::Value = match serde_json::from_str(buf.trim()) {
+            // Strip <think>...</think> blocks (Qwen3 thinking mode) then find the
+            // leading JSON object. Fall back to emitting raw output on parse failure.
+            let response: serde_json::Value = match serde_json::from_str(extract_json(&buf)) {
                 Ok(v) => v,
                 Err(_) => {
-                    // Grammar should prevent malformed JSON; emit as-is on failure.
                     let _ = text_tx
                         .send(StreamEvent {
                             delta: buf,
@@ -156,5 +148,22 @@ impl AgentLoop {
             })
             .await;
         Ok(())
+    }
+}
+
+/// Strips `<think>...</think>` blocks and returns the slice starting from the
+/// first `{`, so Qwen3 thinking tokens don't break JSON parsing.
+fn extract_json(s: &str) -> &str {
+    let s = if let (Some(start), Some(end_tag)) = (s.find("<think>"), s.find("</think>")) {
+        let end = end_tag + "</think>".len();
+        if start == 0 { s[end..].trim_start() } else { s }
+    } else {
+        s
+    };
+    let trimmed = s.trim();
+    if let Some(brace) = trimmed.find('{') {
+        trimmed[brace..].trim_end()
+    } else {
+        trimmed
     }
 }

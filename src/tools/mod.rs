@@ -1,5 +1,6 @@
 pub mod fs;
 pub mod shell;
+pub mod web;
 
 use serde_json::Value;
 
@@ -36,9 +37,9 @@ impl ToolRegistry {
     pub fn with_defaults() -> Self {
         Self::new()
             .register(Box::new(fs::ReadFileTool))
-            .register(Box::new(fs::ListDirTool))
             .register(Box::new(fs::WriteFileTool))
             .register(Box::new(shell::RunCommandTool))
+            .register(Box::new(web::WebSearchTool))
     }
 
     pub fn register(mut self, tool: Box<dyn Tool>) -> Self {
@@ -60,43 +61,11 @@ impl ToolRegistry {
         }
     }
 
-    /// Generates a GBNF grammar that constrains the model to output exactly one of:
-    ///   {"type":"text","content":"<answer>"}
-    ///   {"type":"tool_call","name":"<tool>","args":{...}}
-    pub fn build_grammar(&self) -> String {
-        let name_enum: String = self
-            .tools
-            .iter()
-            .map(|t| format!("\"\\\"{}\\\"\"", t.name()))
-            .collect::<Vec<_>>()
-            .join(" | ");
-
-        // The format! call uses {{ / }} to produce literal { / } in the output.
-        // The GBNF string-char rule uses [^"\\] (any char except " and \) and
-        // "\\" (escaped backslash) — these survive both Rust raw-string and format!
-        // processing unchanged, and are interpreted correctly by the GBNF parser.
-        format!(
-            r#"root ::= text-resp | tool-resp
-text-resp ::= "{{" ws "\"type\"" ws ":" ws "\"text\"" ws "," ws "\"content\"" ws ":" ws string ws "}}"
-tool-resp ::= "{{" ws "\"type\"" ws ":" ws "\"tool_call\"" ws "," ws "\"name\"" ws ":" ws tool-name ws "," ws "\"args\"" ws ":" ws json-object ws "}}"
-tool-name ::= {name_enum}
-json-object ::= "{{" ws (json-pair ("," ws json-pair)*)? "}}"
-json-pair ::= string ws ":" ws json-value
-json-value ::= string | json-number | json-object | json-array | "true" | "false" | "null"
-json-array ::= "[" ws (json-value ("," ws json-value)*)? "]"
-string ::= "\"" string-char* "\""
-string-char ::= [^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
-json-number ::= "-"? ([0-9] | [1-9] [0-9]*) ("." [0-9]+)? ([eE] [-+]? [0-9]+)?
-ws ::= [ \t\n\r]*
-"#,
-            name_enum = name_enum
-        )
-    }
-
     /// Returns a minimal tool-instruction block for the system prompt.
     pub fn system_prompt_section(&self) -> String {
         let mut s = String::from(
             "## Tools\n\
+             /no_think\n\
              Always output exactly one JSON object — no surrounding text.\n\
              To answer: {\"type\":\"text\",\"content\":\"your answer\"}\n\
              To use a tool: {\"type\":\"tool_call\",\"name\":\"tool\",\"args\":{...}}\n\n\

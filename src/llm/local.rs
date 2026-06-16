@@ -19,7 +19,6 @@ use super::{Backend, BackendError, InferOptions, StreamEvent};
 
 struct InferenceJob {
     messages: Vec<Message>,
-    grammar: Option<String>,
     cancel: CancellationToken,
     tx: mpsc::Sender<StreamEvent>,
 }
@@ -89,13 +88,9 @@ fn load_model(
     let model_path: PathBuf = if hf_file.is_empty() {
         PathBuf::from(hf_repo)
     } else {
-        if no_download {
-            // SAFETY: daemon warm_up runs once before accepting connections;
-            // no other threads are reading/writing env vars at this point.
-            unsafe { std::env::set_var("HF_HUB_OFFLINE", "1") };
-        }
+        // When no_download=true the CLI has already cached the file; hf_hub will
+        // find it in the cache directory without making any network requests.
         let api = hf_hub::api::sync::ApiBuilder::new()
-            .with_progress(true)
             .build()
             .map_err(|e| BackendError::Unavailable(e.to_string()))?;
         api.model(hf_repo.to_string()).get(hf_file).map_err(|_| {
@@ -189,10 +184,10 @@ impl Backend for LocalBackend {
         cancel: CancellationToken,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<(), BackendError> {
+        let _ = options;
         let handle = self.get_handle().await?;
         let job = InferenceJob {
             messages: messages.to_vec(),
-            grammar: options.grammar.clone(),
             cancel,
             tx,
         };
@@ -327,11 +322,7 @@ fn run_with_prefix_cache(
     // Generation loop — one token at a time.
     let max_new = (cw as i32).saturating_sub(prompt_len);
     let mut n_cur = prompt_len;
-    let mut sampler = match &job.grammar {
-        Some(g) => LlamaSampler::grammar(model, g, "root")
-            .map_err(|e| BackendError::Inference(format!("grammar error: {e}")))?,
-        None => LlamaSampler::greedy(),
-    };
+    let mut sampler = LlamaSampler::greedy();
     let mut decoder = encoding_rs::UTF_8.new_decoder();
 
     // After the prefill decode, the logits for the last prompt token are at the
@@ -401,23 +392,22 @@ pub fn resolve_cw(name: &str) -> usize {
 }
 
 /// Maps short model names to (HuggingFace repo, GGUF filename, context_window).
+/// User-registered models from `~/.axon/config.toml` take priority over the built-in table.
 /// For local `.gguf` paths, returns (full_path, "", cw).
 pub(crate) fn resolve_model(name: &str) -> (String, String, usize) {
+    let config = crate::config::AxonConfig::load();
+    if let Some(entry) = config.find_model(name) {
+        return (
+            entry.hf_repo.clone(),
+            entry.hf_file.clone(),
+            entry.context_window,
+        );
+    }
     match name {
-        "qwen2.5-coder-1.5b-instruct-q4_k_m" | "qwen2.5-coder:1.5b" | "qwen2.5-coder-1.5b" => (
-            "bartowski/Qwen2.5-Coder-1.5B-Instruct-GGUF".into(),
-            "Qwen2.5-Coder-1.5B-Instruct-Q4_K_M.gguf".into(),
-            4096,
-        ),
-        "qwen2.5-coder-3b-instruct-q4_k_m" | "qwen2.5-coder:3b" | "qwen2.5-coder-3b" => (
-            "bartowski/Qwen2.5-Coder-3B-Instruct-GGUF".into(),
-            "Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf".into(),
-            4096,
-        ),
-        "qwen2.5-coder-7b-instruct-q4_k_m" | "qwen2.5-coder:7b" | "qwen2.5-coder-7b" => (
-            "bartowski/Qwen2.5-Coder-7B-Instruct-GGUF".into(),
-            "Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf".into(),
-            8192,
+        "qwen3-4b-q4_k_m" | "qwen3:4b" | "qwen3-4b" => (
+            "unsloth/Qwen3-4B-GGUF".into(),
+            "Qwen3-4B-Q4_K_M.gguf".into(),
+            32768,
         ),
         _ => {
             if name.ends_with(".gguf") {

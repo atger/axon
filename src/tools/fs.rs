@@ -3,7 +3,6 @@ use serde_json::Value;
 use super::{Tool, ToolError};
 
 pub struct ReadFileTool;
-pub struct ListDirTool;
 pub struct WriteFileTool;
 
 impl Tool for ReadFileTool {
@@ -31,35 +30,6 @@ impl Tool for ReadFileTool {
         } else {
             Ok(contents)
         }
-    }
-}
-
-impl Tool for ListDirTool {
-    fn name(&self) -> &str {
-        "list_dir"
-    }
-
-    fn description(&self) -> &str {
-        "list_dir(path: string) — list files and directories at the given path"
-    }
-
-    fn execute(&self, args: Value) -> Result<String, ToolError> {
-        let path = args["path"]
-            .as_str()
-            .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
-        let mut entries: Vec<String> = std::fs::read_dir(path)?
-            .filter_map(|e| e.ok())
-            .map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if e.file_type().is_ok_and(|ft| ft.is_dir()) {
-                    format!("{name}/")
-                } else {
-                    name
-                }
-            })
-            .collect();
-        entries.sort();
-        Ok(entries.join("\n"))
     }
 }
 
