@@ -305,18 +305,31 @@ fn run_with_prefix_cache(
         0
     };
 
-    // Decode only the new portion of the prompt (skip cached prefix tokens).
+    // Decode only the new portion of the prompt in chunks to stay within n_batch.
+    // A large skill content can easily exceed the default n_batch (512), so we
+    // must split the prefill into fixed-size chunks rather than one giant batch.
+    const PREFILL_CHUNK: usize = 512;
     let new_tokens = &all_tokens[decode_start as usize..];
+    let mut last_batch_pos = 0i32;
     if !new_tokens.is_empty() {
-        let mut batch = LlamaBatch::new(new_tokens.len().max(512), 1);
-        for (i, &token) in (0i32..).zip(new_tokens.iter()) {
-            let pos = decode_start + i;
-            batch
-                .add(token, pos, &[0], pos == prompt_len - 1)
+        let last_tok_idx = new_tokens.len() - 1;
+        let mut processed = 0usize;
+        for chunk in new_tokens.chunks(PREFILL_CHUNK) {
+            let mut batch = LlamaBatch::new(chunk.len(), 1);
+            for (ci, &token) in chunk.iter().enumerate() {
+                let pos = decode_start + (processed + ci) as i32;
+                let want_logits = processed + ci == last_tok_idx;
+                batch
+                    .add(token, pos, &[0], want_logits)
+                    .map_err(|e| BackendError::Inference(e.to_string()))?;
+                if want_logits {
+                    last_batch_pos = ci as i32;
+                }
+            }
+            ctx.decode(&mut batch)
                 .map_err(|e| BackendError::Inference(e.to_string()))?;
+            processed += chunk.len();
         }
-        ctx.decode(&mut batch)
-            .map_err(|e| BackendError::Inference(e.to_string()))?;
     }
 
     // Generation loop — one token at a time.
@@ -324,11 +337,6 @@ fn run_with_prefix_cache(
     let mut n_cur = prompt_len;
     let mut sampler = LlamaSampler::greedy();
     let mut decoder = encoding_rs::UTF_8.new_decoder();
-
-    // After the prefill decode, the logits for the last prompt token are at the
-    // final position in the new_tokens batch. For generation steps, the
-    // single-token batch always has one entry at position 0.
-    let mut last_batch_pos = new_tokens.len().saturating_sub(1) as i32;
 
     'generation: loop {
         if n_cur >= prompt_len + max_new {
