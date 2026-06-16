@@ -1,0 +1,5 @@
+[build]
+# Propagated to llama-cpp-sys-2's build.rs via CARGO_ENCODED_RUSTFLAGS, which
+# sets GGML_NATIVE=ON to enable AVX2/AVX-512 kernels in the inference backend.
+# The binary will not run on CPUs older than the build machine.
+rustflags = ["-C", "target-cpu=native"]
