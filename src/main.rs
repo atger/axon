@@ -25,7 +25,6 @@ async fn main() -> color_eyre::Result<()> {
 
     let backend: Arc<dyn Backend> = match args.backend {
         BackendKind::Local => {
-            eprintln!("Starting axon daemon (model: {})…", args.model);
             let port = daemon::ensure::ensure_daemon_running(
                 &args.model,
                 args.no_download,
