@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{Backend, BackendError, StreamEvent};
+use super::{Backend, BackendError, InferOptions, StreamEvent};
 use crate::session::{Message, Role};
 
 pub struct OllamaBackend {
@@ -38,6 +38,7 @@ impl Backend for OllamaBackend {
     async fn stream(
         &self,
         messages: &[Message],
+        _options: &InferOptions,
         cancel: CancellationToken,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<(), BackendError> {

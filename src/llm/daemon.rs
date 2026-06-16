@@ -4,7 +4,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::{Backend, BackendError, StreamEvent};
+use super::{Backend, BackendError, InferOptions, StreamEvent};
 use crate::daemon::proto::{DaemonRequest, DaemonResponse};
 use crate::session::Message;
 
@@ -29,6 +29,7 @@ impl Backend for DaemonBackend {
     async fn stream(
         &self,
         messages: &[Message],
+        options: &InferOptions,
         cancel: CancellationToken,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<(), BackendError> {
@@ -41,6 +42,7 @@ impl Backend for DaemonBackend {
         let req = DaemonRequest {
             messages: messages.to_vec(),
             model_name: self.name.clone(),
+            grammar: options.grammar.clone(),
         };
         let mut req_line =
             serde_json::to_string(&req).map_err(|e| BackendError::Inference(e.to_string()))?;

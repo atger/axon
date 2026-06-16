@@ -4,15 +4,20 @@ use std::time::Duration;
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
+    text::Line,
+    widgets::{Block, Borders, Clear, Paragraph},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+use crate::agent::{AgentLoop, ConfirmFn};
 use crate::cli::{Args, BackendKind};
 use crate::context::ContextProvider;
 use crate::llm::{Backend, StreamEvent, daemon::DaemonBackend, ollama::OllamaBackend};
 use crate::session::{ConversationHistory, Message};
+use crate::tools::ToolRegistry;
 use crate::ui::{
     chat::ChatWidget,
     input::InputWidget,
@@ -24,6 +29,11 @@ enum AppEvent {
     StreamDelta(String),
     StreamDone,
     StreamError(String),
+    ToolConfirmRequest {
+        tool_name: String,
+        args_summary: String,
+        confirm_tx: oneshot::Sender<bool>,
+    },
 }
 
 enum Generating {
@@ -31,6 +41,12 @@ enum Generating {
     Active {
         cancel: CancellationToken,
         partial: String,
+    },
+    AwaitingConfirm {
+        cancel: CancellationToken,
+        tool_name: String,
+        args_summary: String,
+        confirm_tx: oneshot::Sender<bool>,
     },
 }
 
@@ -43,6 +59,7 @@ pub struct App<'a> {
     ollama_url: String,
     no_download: bool,
     context: ContextProvider,
+    tools: Arc<ToolRegistry>,
     chat: ChatWidget,
     input: InputWidget<'a>,
     generating: Generating,
@@ -66,6 +83,7 @@ impl<'a> App<'a> {
             ollama_url: args.ollama_url.clone(),
             no_download: args.no_download,
             context,
+            tools: Arc::new(ToolRegistry::with_defaults()),
             chat: ChatWidget::new(),
             input: InputWidget::new(),
             generating: Generating::Idle,
@@ -127,7 +145,9 @@ impl<'a> App<'a> {
         } else {
             match &self.generating {
                 Generating::Idle => GenState::Idle,
-                Generating::Active { .. } => GenState::Generating,
+                Generating::Active { .. } | Generating::AwaitingConfirm { .. } => {
+                    GenState::Generating
+                }
             }
         };
         status::render(
@@ -140,7 +160,7 @@ impl<'a> App<'a> {
 
         let streaming = match &self.generating {
             Generating::Active { partial, .. } => Some(partial.as_str()),
-            Generating::Idle => None,
+            _ => None,
         };
         // Collect displayed messages (exclude bare system prompt)
         let display_msgs: Vec<Message> = self
@@ -152,6 +172,16 @@ impl<'a> App<'a> {
             .collect();
         self.chat.render(frame, chunks[1], &display_msgs, streaming);
         self.input.render(frame, chunks[2]);
+
+        // Confirmation overlay — rendered on top when awaiting user approval.
+        if let Generating::AwaitingConfirm {
+            tool_name,
+            args_summary,
+            ..
+        } = &self.generating
+        {
+            render_confirm_overlay(frame, area, tool_name, args_summary);
+        }
     }
 
     async fn handle_event(
@@ -184,11 +214,28 @@ impl<'a> App<'a> {
                 self.chat.scroll_to_bottom();
             }
             AppEvent::StreamError(e) => {
-                if let Generating::Active { .. } =
+                if let Generating::Active { .. } | Generating::AwaitingConfirm { .. } =
                     std::mem::replace(&mut self.generating, Generating::Idle)
                 {
                     self.session
                         .push(Message::assistant(format!("[error] {e}")));
+                }
+            }
+
+            AppEvent::ToolConfirmRequest {
+                tool_name,
+                args_summary,
+                confirm_tx,
+            } => {
+                if let Generating::Active { cancel, .. } =
+                    std::mem::replace(&mut self.generating, Generating::Idle)
+                {
+                    self.generating = Generating::AwaitingConfirm {
+                        cancel,
+                        tool_name,
+                        args_summary,
+                        confirm_tx,
+                    };
                 }
             }
         }
@@ -200,13 +247,36 @@ impl<'a> App<'a> {
         key: KeyEvent,
         app_tx: &mpsc::Sender<AppEvent>,
     ) -> color_eyre::Result<()> {
+        // While awaiting tool confirmation, only y/n/Esc/Ctrl+C are handled.
+        if matches!(self.generating, Generating::AwaitingConfirm { .. }) {
+            match (key.modifiers, key.code) {
+                (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => {
+                    self.cancel_with_deny();
+                }
+                (_, KeyCode::Char('y') | KeyCode::Char('Y')) => {
+                    self.resolve_confirm(true);
+                }
+                (_, KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc) => {
+                    self.resolve_confirm(false);
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // Global shortcuts take precedence
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => {
-                match &self.generating {
+                match std::mem::replace(&mut self.generating, Generating::Idle) {
                     Generating::Active { cancel, .. } => {
                         cancel.cancel();
                         // StreamDone will fire and finalize
+                    }
+                    Generating::AwaitingConfirm {
+                        cancel, confirm_tx, ..
+                    } => {
+                        cancel.cancel();
+                        let _ = confirm_tx.send(false);
                     }
                     Generating::Idle => self.running = false,
                 }
@@ -253,8 +323,36 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    /// Sends `confirmed` to the agent and restores the Active generating state.
+    fn resolve_confirm(&mut self, confirmed: bool) {
+        if let Generating::AwaitingConfirm {
+            cancel, confirm_tx, ..
+        } = std::mem::replace(&mut self.generating, Generating::Idle)
+        {
+            let _ = confirm_tx.send(confirmed);
+            self.generating = Generating::Active {
+                cancel,
+                partial: String::new(),
+            };
+        }
+    }
+
+    /// Cancels the agent and denies any pending confirmation.
+    fn cancel_with_deny(&mut self) {
+        if let Generating::AwaitingConfirm {
+            cancel, confirm_tx, ..
+        } = std::mem::replace(&mut self.generating, Generating::Idle)
+        {
+            cancel.cancel();
+            let _ = confirm_tx.send(false);
+        }
+    }
+
     async fn handle_submit(&mut self, app_tx: &mpsc::Sender<AppEvent>) -> color_eyre::Result<()> {
-        if matches!(self.generating, Generating::Active { .. }) {
+        if matches!(
+            self.generating,
+            Generating::Active { .. } | Generating::AwaitingConfirm { .. }
+        ) {
             return Ok(());
         }
 
@@ -270,30 +368,19 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
-        // @file prefix — prepend file content
-        let (user_text, file_prefix) = if let Some(path) = text.strip_prefix('@') {
-            let path = path.split_whitespace().next().unwrap_or("");
-            match std::fs::read_to_string(path) {
-                Ok(contents) => {
-                    let rest = text[1 + path.len()..].trim().to_string();
-                    let combined = format!("File `{path}`:\n```\n{contents}\n```\n{rest}");
-                    (combined, true)
-                }
-                Err(e) => {
-                    self.session
-                        .push(Message::assistant(format!("[error reading {path}] {e}")));
-                    return Ok(());
-                }
-            }
-        } else {
-            (text.clone(), false)
-        };
-        let _ = file_prefix; // suppress unused warning
+        // Expand @path references anywhere in the message.
+        let user_text = expand_at_files(&text);
 
         self.session.push(Message::user(user_text));
         self.chat.scroll_to_bottom();
 
-        let messages = self.session.assemble(&self.context.system_prompt());
+        // Assemble system prompt including tool instructions.
+        let system_prompt = format!(
+            "{}\n{}",
+            self.context.system_prompt(),
+            self.tools.system_prompt_section()
+        );
+        let messages = self.session.assemble(&system_prompt);
         let (stream_tx, mut stream_rx) = mpsc::channel::<StreamEvent>(64);
         let cancel = CancellationToken::new();
 
@@ -303,14 +390,30 @@ impl<'a> App<'a> {
         };
 
         let backend = Arc::clone(&self.backend);
+        let tools = Arc::clone(&self.tools);
+        let app_tx_confirm = app_tx.clone();
         let app_tx2 = app_tx.clone();
         let cancel2 = cancel.clone();
+
         tokio::spawn(async move {
-            match backend.stream(&messages, cancel2, stream_tx).await {
-                Ok(()) => {}
-                Err(e) => {
-                    let _ = app_tx2.send(AppEvent::StreamError(e.to_string())).await;
-                }
+            let confirm: ConfirmFn = Box::new(move |tool_name, args_summary| {
+                let tx = app_tx_confirm.clone();
+                Box::pin(async move {
+                    let (conf_tx, conf_rx) = oneshot::channel::<bool>();
+                    let _ = tx
+                        .send(AppEvent::ToolConfirmRequest {
+                            tool_name,
+                            args_summary,
+                            confirm_tx: conf_tx,
+                        })
+                        .await;
+                    conf_rx.await.unwrap_or(false)
+                })
+            });
+
+            let agent = AgentLoop::new(backend, tools);
+            if let Err(e) = agent.run(messages, cancel2, &confirm, stream_tx).await {
+                let _ = app_tx2.send(AppEvent::StreamError(e.to_string())).await;
             }
         });
 
@@ -427,6 +530,83 @@ impl<'a> App<'a> {
         }
         Ok(())
     }
+}
+
+/// Expands `@path` tokens anywhere in `text` by replacing them with the file's
+/// contents inline. Unreadable paths are left as-is so the model still sees them.
+fn expand_at_files(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut chars = text.char_indices().peekable();
+    while let Some((_, c)) = chars.next() {
+        if c == '@' {
+            let path: String = chars
+                .by_ref()
+                .take_while(|(_, c)| !c.is_whitespace())
+                .map(|(_, c)| c)
+                .collect();
+            if path.is_empty() {
+                result.push('@');
+            } else {
+                match std::fs::read_to_string(&path) {
+                    Ok(contents) => {
+                        result.push_str(&format!("[File `{path}`:\n```\n{contents}\n```]"));
+                    }
+                    Err(_) => {
+                        result.push('@');
+                        result.push_str(&path);
+                    }
+                }
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Renders a centered confirmation dialog over the existing UI.
+fn render_confirm_overlay(frame: &mut Frame, area: Rect, tool_name: &str, args_summary: &str) {
+    let width = area.width.min(60);
+    let height = 7u16;
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    // Truncate args_summary to fit within the dialog width (accounting for borders + padding).
+    let inner_width = width.saturating_sub(4) as usize;
+    let args_display = if args_summary.len() > inner_width {
+        format!("{}…", &args_summary[..inner_width.saturating_sub(1)])
+    } else {
+        args_summary.to_string()
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::styled(
+            format!("  Run: {tool_name}"),
+            Style::default().fg(Color::Yellow),
+        ),
+        Line::from(format!("  {args_display}")),
+        Line::from(""),
+        Line::styled(
+            "  [y] confirm   [n / Esc] cancel",
+            Style::default().fg(Color::Cyan),
+        ),
+    ];
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Confirm tool call ")
+                    .title_alignment(Alignment::Center)
+                    .border_style(Style::default().fg(Color::Yellow)),
+            )
+            .alignment(Alignment::Left),
+        popup,
+    );
 }
 
 pub async fn run_tui(backend: Arc<dyn Backend>, args: &Args) -> color_eyre::Result<()> {

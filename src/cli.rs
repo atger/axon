@@ -1,8 +1,19 @@
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Stop the running daemon and free the model from memory.
+    Stop,
+    /// Show the status of the running daemon.
+    Status,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "axon", version, about = "Local AI coding assistant")]
 pub struct Args {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     /// Non-interactive prompt; streams to stdout then exits
     pub prompt: Option<String>,
 

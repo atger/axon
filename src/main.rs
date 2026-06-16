@@ -2,22 +2,33 @@ use std::sync::Arc;
 
 use clap::Parser;
 
+mod agent;
 mod app;
 mod cli;
+mod commands;
 mod context;
 mod daemon;
 mod llm;
 mod runner;
 mod session;
+mod tools;
 mod ui;
 
-use cli::{Args, BackendKind};
+use cli::{Args, BackendKind, Command};
 use llm::{Backend, daemon::DaemonBackend, ollama::OllamaBackend};
 
 #[tokio::main]
 async fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
     let args = Args::parse();
+
+    // Subcommands are handled before any backend or daemon startup.
+    if let Some(cmd) = &args.command {
+        return match cmd {
+            Command::Stop => commands::stop(),
+            Command::Status => commands::status().await,
+        };
+    }
 
     if args.daemon {
         return daemon::run_daemon(&args.model, args.no_download, args.context_window).await;

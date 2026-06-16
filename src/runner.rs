@@ -5,7 +5,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cli::Args;
 use crate::context::ContextProvider;
-use crate::llm::Backend;
+use crate::llm::{Backend, InferOptions};
 use crate::session::{ConversationHistory, Message};
 
 pub async fn run_once(
@@ -28,7 +28,10 @@ pub async fn run_once(
     let msgs = messages.clone();
     let cancel2 = cancel.clone();
     tokio::spawn(async move {
-        if let Err(e) = backend_clone.stream(&msgs, cancel2, tx).await {
+        if let Err(e) = backend_clone
+            .stream(&msgs, &InferOptions::default(), cancel2, tx)
+            .await
+        {
             eprintln!("\nError: {e}");
         }
     });

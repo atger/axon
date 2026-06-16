@@ -4,15 +4,15 @@ use std::time::{Duration, Instant};
 use color_eyre::eyre::{self, WrapErr};
 use tokio::net::TcpStream;
 
-use super::{axon_log_file, axon_pid_file, axon_port_file};
+use super::{axon_log_file, axon_model_file, axon_pid_file, axon_port_file};
 
-fn try_read_port(port_file: &PathBuf) -> Option<u16> {
+pub(crate) fn try_read_port(port_file: &PathBuf) -> Option<u16> {
     std::fs::read_to_string(port_file)
         .ok()
         .and_then(|s| s.trim().parse::<u16>().ok())
 }
 
-fn try_read_pid(pid_file: &PathBuf) -> Option<u32> {
+pub(crate) fn try_read_pid(pid_file: &PathBuf) -> Option<u32> {
     std::fs::read_to_string(pid_file)
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
@@ -20,7 +20,7 @@ fn try_read_pid(pid_file: &PathBuf) -> Option<u32> {
 
 /// Returns true if a process with the given PID is still alive.
 /// Uses `kill -0` on Unix (signal 0 = existence check, no actual signal sent).
-fn pid_is_alive(pid: u32) -> bool {
+pub(crate) fn pid_is_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         std::process::Command::new("kill")
@@ -77,6 +77,7 @@ pub fn invalidate_daemon() -> color_eyre::Result<()> {
 
     let _ = std::fs::remove_file(&port_file);
     let _ = std::fs::remove_file(&pid_file);
+    let _ = std::fs::remove_file(axon_model_file().unwrap_or_default());
     Ok(())
 }
 

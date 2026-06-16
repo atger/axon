@@ -15,10 +15,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::session::{Message, Role};
 
-use super::{Backend, BackendError, StreamEvent};
+use super::{Backend, BackendError, InferOptions, StreamEvent};
 
 struct InferenceJob {
     messages: Vec<Message>,
+    grammar: Option<String>,
     cancel: CancellationToken,
     tx: mpsc::Sender<StreamEvent>,
 }
@@ -184,12 +185,14 @@ impl Backend for LocalBackend {
     async fn stream(
         &self,
         messages: &[Message],
+        options: &InferOptions,
         cancel: CancellationToken,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<(), BackendError> {
         let handle = self.get_handle().await?;
         let job = InferenceJob {
             messages: messages.to_vec(),
+            grammar: options.grammar.clone(),
             cancel,
             tx,
         };
@@ -324,7 +327,11 @@ fn run_with_prefix_cache(
     // Generation loop — one token at a time.
     let max_new = (cw as i32).saturating_sub(prompt_len);
     let mut n_cur = prompt_len;
-    let mut sampler = LlamaSampler::greedy();
+    let mut sampler = match &job.grammar {
+        Some(g) => LlamaSampler::grammar(model, g, "root")
+            .map_err(|e| BackendError::Inference(format!("grammar error: {e}")))?,
+        None => LlamaSampler::greedy(),
+    };
     let mut decoder = encoding_rs::UTF_8.new_decoder();
 
     // After the prefill decode, the logits for the last prompt token are at the

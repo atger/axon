@@ -10,14 +10,14 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_util::sync::CancellationToken;
 
-use crate::llm::{Backend, StreamEvent, local::LocalBackend};
+use crate::llm::{Backend, InferOptions, StreamEvent, local::LocalBackend};
 use proto::{DaemonRequest, DaemonResponse};
 
 pub fn axon_data_dir() -> color_eyre::Result<PathBuf> {
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .wrap_err("HOME environment variable not set")?;
-    Ok(home.join(".local").join("share").join("axon"))
+    Ok(home.join(".axon"))
 }
 
 pub fn axon_port_file() -> color_eyre::Result<PathBuf> {
@@ -34,6 +34,10 @@ pub fn axon_log_file() -> color_eyre::Result<PathBuf> {
     Ok(axon_data_dir()?.join("daemon.log"))
 }
 
+pub fn axon_model_file() -> color_eyre::Result<PathBuf> {
+    Ok(axon_data_dir()?.join("model"))
+}
+
 pub async fn run_daemon(
     model: &str,
     no_download: bool,
@@ -44,6 +48,7 @@ pub async fn run_daemon(
     std::fs::create_dir_all(axon_data_dir()?).wrap_err("failed to create data directory")?;
     std::fs::write(axon_pid_file()?, std::process::id().to_string())
         .wrap_err("failed to write PID file")?;
+    std::fs::write(axon_model_file()?, model).wrap_err("failed to write model file")?;
 
     // Load model before binding the port — the port file appearing is the readiness signal.
     let local = LocalBackend::new(model, no_download);
@@ -137,8 +142,11 @@ async fn handle_connection(
     let (tx, mut rx) = mpsc::channel::<StreamEvent>(64);
 
     let messages = req.messages;
+    let options = InferOptions {
+        grammar: req.grammar,
+    };
     tokio::spawn(async move {
-        let _ = backend.stream(&messages, cancel2, tx).await;
+        let _ = backend.stream(&messages, &options, cancel2, tx).await;
     });
 
     while let Some(ev) = rx.recv().await {
