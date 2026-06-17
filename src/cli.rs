@@ -10,6 +10,26 @@ pub enum Command {
     Config(ConfigCmd),
     /// Manage registered models.
     Model(ModelCmd),
+    /// Define and execute multi-step AI workflows.
+    Workflow(WorkflowCmd),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct WorkflowCmd {
+    #[command(subcommand)]
+    pub action: WorkflowAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorkflowAction {
+    /// Compile and execute a workflow markdown file.
+    Run {
+        /// Path to the workflow markdown file.
+        file: std::path::PathBuf,
+        /// Print the compiled JSON plan without executing.
+        #[arg(long)]
+        compile_only: bool,
+    },
 }
 
 #[derive(clap::Args, Debug)]

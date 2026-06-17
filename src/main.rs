@@ -15,6 +15,7 @@ mod session;
 mod skills;
 mod tools;
 mod ui;
+mod workflow;
 
 use cli::{Args, BackendKind, Command};
 use config::{AxonConfig, ModelEntry};
@@ -28,12 +29,13 @@ async fn main() -> color_eyre::Result<()> {
 
     // Subcommands that don't need a backend.
     if let Some(cmd) = &args.command {
-        return match cmd {
-            Command::Stop => commands::stop(),
-            Command::Status => commands::status().await,
-            Command::Config(cmd) => handle_config(cmd, &mut config),
-            Command::Model(cmd) => handle_model(cmd, &mut config),
-        };
+        match cmd {
+            Command::Stop => return commands::stop(),
+            Command::Status => return commands::status().await,
+            Command::Config(cmd) => return handle_config(cmd, &mut config),
+            Command::Model(cmd) => return handle_model(cmd, &mut config),
+            Command::Workflow(_) => {} // needs a backend — handled below
+        }
     }
 
     // Resolve effective values: CLI flag → config → hardcoded default.
@@ -68,6 +70,16 @@ async fn main() -> color_eyre::Result<()> {
         }
         BackendKind::Ollama => Arc::new(OllamaBackend::new(&ollama_url, &model)),
     };
+
+    // Workflow subcommand (needs backend).
+    if let Some(Command::Workflow(cmd)) = &args.command {
+        match &cmd.action {
+            cli::WorkflowAction::Run { file, compile_only } => {
+                let engine = workflow::WorkflowEngine::new(backend);
+                return engine.run_workflow(file, *compile_only).await;
+            }
+        }
+    }
 
     // Resolve skill (download if URL, find locally if name).
     let skill_content: Option<String> = if let Some(ref s) = args.skill {
