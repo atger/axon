@@ -134,7 +134,10 @@ fn start_inference_thread(
             }
         };
 
-        let ctx_params = LlamaContextParams::default().with_n_ctx(NonZeroU32::new(cw as u32));
+        let ctx_params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(cw as u32))
+            .with_n_threads(1)
+            .with_n_threads_batch(1);
         let mut ctx = match model.new_context(&backend, ctx_params) {
             Ok(c) => c,
             Err(e) => {

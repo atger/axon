@@ -199,8 +199,10 @@ pub async fn ensure_daemon_running(
 
     // Poll until the port file appears and the daemon accepts connections.
     // Timeout is generous: debug builds + first HF download can take many minutes.
-    let deadline = Instant::now() + Duration::from_secs(600);
-    let mut last_progress = Instant::now();
+    let start = Instant::now();
+    let deadline = start + Duration::from_secs(600);
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    let mut last_secs = u64::MAX;
 
     loop {
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -208,12 +210,18 @@ pub async fn ensure_daemon_running(
         if let Some(port) = try_read_port(&port_file)
             && TcpStream::connect(("127.0.0.1", port)).await.is_ok()
         {
+            if is_tty {
+                eprintln!();
+            }
             return Ok(port);
         }
 
         // Detect daemon death early rather than waiting for the full 10-min timeout.
         if try_read_pid(&pid_file).is_none_or(|pid| !pid_is_alive(pid)) {
             // Clean up stale files so the next invocation starts fresh automatically.
+            if is_tty {
+                eprintln!();
+            }
             let _ = std::fs::remove_file(&port_file);
             let _ = std::fs::remove_file(&pid_file);
             let _ = std::fs::remove_file(axon_model_file().unwrap_or_default());
@@ -230,12 +238,26 @@ pub async fn ensure_daemon_running(
             eyre::bail!("axon daemon exited unexpectedly:\n{tail}");
         }
 
-        if last_progress.elapsed() >= Duration::from_secs(15) {
-            eprintln!("axon: still loading model…");
-            last_progress = Instant::now();
+        let elapsed = start.elapsed().as_secs();
+        if elapsed != last_secs {
+            last_secs = elapsed;
+            let (m, s) = (elapsed / 60, elapsed % 60);
+            let progress = if m > 0 {
+                format!("{m}m {s}s")
+            } else {
+                format!("{s}s")
+            };
+            if is_tty {
+                eprint!("\raxon: loading '{model}'… {progress}");
+            } else if elapsed > 0 && elapsed.is_multiple_of(15) {
+                eprintln!("axon: loading '{model}'… {progress}");
+            }
         }
 
         if Instant::now() >= deadline {
+            if is_tty {
+                eprintln!();
+            }
             // Kill the daemon and clean up so the next run can start fresh.
             invalidate_daemon()?;
             eyre::bail!(
