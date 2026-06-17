@@ -61,14 +61,17 @@ impl ToolRegistry {
         }
     }
 
-    /// Returns a minimal tool-instruction block for the system prompt.
+    /// Returns the complete system prompt: persona, tool instructions, and tool list.
     pub fn system_prompt_section(&self) -> String {
-        let mut s = String::from(
-            "## Tools\n\
+        let today = chrono::Local::now().format("%Y-%m-%d");
+        let mut s = format!(
+            "You are Axon, a concise local AI coding assistant. Today is {today}.\n\n\
+             ## Tools\n\
              /no_think\n\
-             Always output exactly one JSON object — no surrounding text.\n\
-             To answer: {\"type\":\"text\",\"content\":\"your answer\"}\n\
-             To use a tool: {\"type\":\"tool_call\",\"name\":\"tool\",\"args\":{...}}\n\n\
+             Always output exactly one JSON object — no surrounding text. \
+             Never say you don't know; use web_search instead.\n\
+             To answer: {{\"type\":\"text\",\"content\":\"your answer\"}}\n\
+             To use a tool: {{\"type\":\"tool_call\",\"name\":\"tool\",\"args\":{{...}}}}\n\n\
              Available tools:\n",
         );
         for tool in &self.tools {

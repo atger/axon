@@ -42,6 +42,7 @@ impl AgentLoop {
     ) -> Result<(), BackendError> {
         const MAX_ITER: usize = 8;
         let options = InferOptions::default();
+        let mut nudged = false;
 
         for _ in 0..MAX_ITER {
             if cancel.is_cancelled() {
@@ -75,11 +76,26 @@ impl AgentLoop {
                 break;
             }
 
+            if std::env::var("AXON_TRACE").is_ok() {
+                eprintln!("[trace] raw model output: {buf:?}");
+            }
+
             // Strip <think>...</think> blocks (Qwen3 thinking mode) then find the
             // leading JSON object. Fall back to emitting raw output on parse failure.
             let response: serde_json::Value = match serde_json::from_str(extract_json(&buf)) {
                 Ok(v) => v,
                 Err(_) => {
+                    if !nudged {
+                        nudged = true;
+                        if std::env::var("AXON_TRACE").is_ok() {
+                            eprintln!("[trace] JSON parse failed — injecting nudge and retrying");
+                        }
+                        messages.push(Message::user(
+                            "[System: output JSON only. Use web_search for current events or when you lack information.]"
+                                .to_string(),
+                        ));
+                        continue;
+                    }
                     let _ = text_tx
                         .send(StreamEvent {
                             delta: buf,
@@ -125,7 +141,14 @@ impl AgentLoop {
                         Err(e) => format!("[tool error: {e}]"),
                     };
 
-                    messages.push(Message::user(format!("[Tool: {name}]\n{result}")));
+                    if std::env::var("AXON_TRACE").is_ok() {
+                        eprintln!("[trace] tool result: {result:?}");
+                    }
+
+                    let today = chrono::Local::now().format("%Y-%m-%d");
+                    messages.push(Message::user(format!(
+                        "[Tool: {name} | today is {today}]\n{result}"
+                    )));
                 }
 
                 _ => {

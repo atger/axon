@@ -26,6 +26,7 @@ encoding_rs = "0.8"
 toml = "0.8"
 ureq = { version = "2", features = ["json"] }
 dirs = "5"
+chrono = "0.4"
 
 # https://ratatui.rs/recipes/apps/release-your-app/#optimizations
 [profile.release]

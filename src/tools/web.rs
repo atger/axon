@@ -1,25 +1,6 @@
-use serde::Deserialize;
 use serde_json::Value;
 
 use super::{Tool, ToolError};
-
-#[derive(Deserialize)]
-struct DdgResponse {
-    #[serde(rename = "AbstractText")]
-    abstract_text: String,
-    #[serde(rename = "AbstractURL")]
-    abstract_url: String,
-    #[serde(rename = "RelatedTopics")]
-    related_topics: Vec<DdgTopic>,
-}
-
-#[derive(Deserialize)]
-struct DdgTopic {
-    #[serde(rename = "Text")]
-    text: Option<String>,
-    #[serde(rename = "FirstURL")]
-    first_url: Option<String>,
-}
 
 pub struct WebSearchTool;
 
@@ -29,7 +10,7 @@ impl Tool for WebSearchTool {
     }
 
     fn description(&self) -> &str {
-        "web_search(query: string) — search the web and return a summary of top results"
+        "web_search(query: string) — search the web; use for current events, news, or anything you are unsure about"
     }
 
     fn execute(&self, args: Value) -> Result<String, ToolError> {
@@ -38,32 +19,64 @@ impl Tool for WebSearchTool {
             .ok_or_else(|| ToolError::InvalidArgs("missing 'query'".into()))?;
 
         let encoded = query.replace(' ', "+");
-        let url = format!(
-            "https://api.duckduckgo.com/?q={encoded}&format=json&no_html=1&skip_disambig=1"
-        );
+        let url = format!("https://html.duckduckgo.com/html/?q={encoded}");
 
-        let resp: DdgResponse = ureq::get(&url)
+        let html = ureq::get(&url)
+            .set("User-Agent", "Mozilla/5.0 (compatible; axon/0.1)")
             .call()
             .map_err(|e| ToolError::CommandFailed(format!("search request failed: {e}")))?
-            .into_json()
+            .into_string()
             .map_err(|e| ToolError::CommandFailed(format!("bad search response: {e}")))?;
 
-        let mut out = String::new();
-        if !resp.abstract_text.is_empty() {
-            out.push_str(&resp.abstract_text);
-            if !resp.abstract_url.is_empty() {
-                out.push_str(&format!("\nSource: {}", resp.abstract_url));
-            }
-            out.push('\n');
+        let snippets = extract_snippets(&html, 5);
+        if snippets.is_empty() {
+            return Ok(format!("No results found for: {query}"));
         }
-        for topic in resp.related_topics.iter().take(5) {
-            if let (Some(text), Some(url)) = (&topic.text, &topic.first_url) {
-                out.push_str(&format!("- {text}\n  {url}\n"));
-            }
-        }
-        if out.is_empty() {
-            out = format!("No results found for: {query}");
-        }
-        Ok(out)
+        Ok(snippets.join("\n"))
     }
+}
+
+/// Extract up to `limit` result snippets from DDG HTML search results.
+fn extract_snippets(html: &str, limit: usize) -> Vec<String> {
+    let mut snippets = Vec::new();
+    let marker = "class=\"result__snippet\"";
+    let mut remaining = html;
+    while snippets.len() < limit {
+        let Some(pos) = remaining.find(marker) else {
+            break;
+        };
+        remaining = &remaining[pos + marker.len()..];
+        let Some(gt) = remaining.find('>') else {
+            break;
+        };
+        remaining = &remaining[gt + 1..];
+        let Some(end) = remaining.find("</a>") else {
+            break;
+        };
+        let text = html_clean(remaining[..end].trim());
+        if !text.is_empty() {
+            snippets.push(text);
+        }
+    }
+    snippets
+}
+
+/// Strip HTML tags and unescape common entities.
+fn html_clean(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&nbsp;", " ")
 }
