@@ -22,6 +22,11 @@ pub trait Tool: Send + Sync {
     fn is_destructive(&self) -> bool {
         false
     }
+    /// Whether this specific invocation requires user confirmation.
+    /// Defaults to `is_destructive()`; tools with arg-dependent safety can override.
+    fn needs_confirm(&self, _args: &Value) -> bool {
+        self.is_destructive()
+    }
     fn execute(&self, args: Value) -> Result<String, ToolError>;
 }
 
@@ -47,11 +52,11 @@ impl ToolRegistry {
         self
     }
 
-    pub fn is_destructive(&self, name: &str) -> bool {
+    pub fn needs_confirm(&self, name: &str, args: &Value) -> bool {
         self.tools
             .iter()
             .find(|t| t.name() == name)
-            .is_some_and(|t| t.is_destructive())
+            .is_some_and(|t| t.needs_confirm(args))
     }
 
     pub fn execute(&self, name: &str, args: Value) -> Result<String, ToolError> {

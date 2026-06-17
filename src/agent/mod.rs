@@ -122,7 +122,7 @@ impl AgentLoop {
                     let name = response["name"].as_str().unwrap_or("").to_string();
                     let args = response["args"].clone();
 
-                    if self.tools.is_destructive(&name) {
+                    if self.tools.needs_confirm(&name, &args) {
                         let args_summary = serde_json::to_string(&args).unwrap_or_default();
                         let confirmed = confirm(name.clone(), args_summary).await;
                         if !confirmed {

@@ -4,6 +4,42 @@ use serde_json::Value;
 
 use super::{Tool, ToolError};
 
+/// Safe read-only binaries that never require confirmation.
+const SAFE_BINS: &[&str] = &[
+    "ls", "ll", "la", "find", "tree", "cat", "head", "tail", "wc", "less", "more", "file", "stat",
+    "grep", "rg", "ag", "awk", "sed", "pwd", "whoami", "date", "uname", "hostname", "id", "ps",
+    "df", "du", "free", "vmstat", "uptime", "echo", "printf", "which", "type", "lsof", "cargo",
+];
+
+/// Safe `git` subcommands (read-only).
+const SAFE_GIT_SUBCMDS: &[&str] = &[
+    "status",
+    "log",
+    "diff",
+    "branch",
+    "show",
+    "blame",
+    "describe",
+    "shortlog",
+    "reflog",
+    "ls-files",
+    "ls-tree",
+    "rev-parse",
+];
+
+fn is_safe_command(cmd: &str) -> bool {
+    let mut tokens = cmd.split_whitespace();
+    let bin = match tokens.next() {
+        Some(b) => b.rsplit('/').next().unwrap_or(b),
+        None => return false,
+    };
+    if bin == "git" {
+        let sub = tokens.next().unwrap_or("");
+        return SAFE_GIT_SUBCMDS.contains(&sub);
+    }
+    SAFE_BINS.contains(&bin)
+}
+
 pub struct RunCommandTool;
 
 impl Tool for RunCommandTool {
@@ -17,6 +53,11 @@ impl Tool for RunCommandTool {
 
     fn is_destructive(&self) -> bool {
         true
+    }
+
+    fn needs_confirm(&self, args: &Value) -> bool {
+        let cmd = args["cmd"].as_str().unwrap_or("");
+        !is_safe_command(cmd)
     }
 
     fn execute(&self, args: Value) -> Result<String, ToolError> {
