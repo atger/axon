@@ -1,7 +1,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseEventKind,
+};
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
@@ -201,6 +204,19 @@ impl<'a> App<'a> {
                 self.on_key(key, app_tx).await?;
             }
             AppEvent::Crossterm(Event::Resize(..)) => {}
+            AppEvent::Crossterm(Event::Mouse(mouse)) => match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.user_scrolled = true;
+                    self.chat.scroll_up(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.chat.scroll_down(3);
+                    if self.chat.scroll_offset == 0 {
+                        self.user_scrolled = false;
+                    }
+                }
+                _ => {}
+            },
             AppEvent::Crossterm(_) => {}
 
             AppEvent::StreamDelta(delta) => {
@@ -301,16 +317,20 @@ impl<'a> App<'a> {
                 }
                 return Ok(());
             }
-            (_, KeyCode::Up) if matches!(self.generating, Generating::Idle) => {
-                // Only navigate history when input is empty or on first line
+            (_, KeyCode::Up) => {
+                // Scroll chat when input is empty or single-line; otherwise move textarea cursor
                 if self.input.text().trim().is_empty() || !self.input.text().contains('\n') {
-                    self.input.history_up();
+                    self.user_scrolled = true;
+                    self.chat.scroll_up(1);
                     return Ok(());
                 }
             }
-            (_, KeyCode::Down) if matches!(self.generating, Generating::Idle) => {
+            (_, KeyCode::Down) => {
                 if self.input.text().trim().is_empty() || !self.input.text().contains('\n') {
-                    self.input.history_down();
+                    self.chat.scroll_down(1);
+                    if self.chat.scroll_offset == 0 {
+                        self.user_scrolled = false;
+                    }
                     return Ok(());
                 }
             }
@@ -627,6 +647,7 @@ pub async fn run_tui(
     skill_content: Option<String>,
 ) -> color_eyre::Result<()> {
     let mut terminal = ratatui::init();
+    crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
     let (tx, rx) = mpsc::channel(64);
     let result = App::new(
         backend,
@@ -638,6 +659,7 @@ pub async fn run_tui(
     )
     .run(&mut terminal, tx, rx)
     .await;
+    crossterm::execute!(std::io::stdout(), DisableMouseCapture).ok();
     ratatui::restore();
     result
 }
