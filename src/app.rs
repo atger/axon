@@ -141,11 +141,12 @@ impl<'a> App<'a> {
 
     fn render(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        let input_height = (self.input.line_count() as u16 + 2).min(area.height.saturating_sub(6));
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(5),    // chat
-                Constraint::Length(5), // input (min 3 + 2 borders)
+                Constraint::Min(5),
+                Constraint::Length(input_height),
                 Constraint::Length(1), // status bar
             ])
             .split(area);
@@ -343,7 +344,11 @@ impl<'a> App<'a> {
                 return Ok(());
             }
             (_, KeyCode::Enter) if key.modifiers != KeyModifiers::SHIFT => {
-                self.handle_submit(app_tx).await?;
+                if self.input.text().trim_end().ends_with('\\') {
+                    self.input.do_continuation();
+                } else {
+                    self.handle_submit(app_tx).await?;
+                }
                 return Ok(());
             }
             _ => {}
@@ -528,6 +533,7 @@ impl<'a> App<'a> {
                      /help           — show this message\n\
                      /quit           — exit axon\n\
                      @<path> <msg>   — prefix your message with a file's contents\n\
+                     \\ + Enter      — insert newline (line continuation)\n\
                      Shift+Enter     — insert newline\n\
                      ↑ / ↓           — navigate input history\n\
                      PgUp / PgDn     — scroll chat\n\
