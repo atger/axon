@@ -57,6 +57,7 @@ pub struct App<'a> {
     // Stored so /model can rebuild the backend without re-parsing CLI args.
     backend_kind: BackendKind,
     ollama_url: String,
+    num_ctx: Option<usize>,
     no_download: bool,
     context: ContextProvider,
     tools: Arc<ToolRegistry>,
@@ -86,6 +87,7 @@ impl<'a> App<'a> {
             backend,
             backend_kind,
             ollama_url,
+            num_ctx: context_window,
             no_download,
             context,
             tools: Arc::new(ToolRegistry::with_defaults()),
@@ -445,7 +447,9 @@ impl<'a> App<'a> {
             "/model" => {
                 if let Some(name) = parts.get(1).map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     let new_backend: Arc<dyn Backend> = match self.backend_kind {
-                        BackendKind::Ollama => Arc::new(OllamaBackend::new(&self.ollama_url, name)),
+                        BackendKind::Ollama => {
+                            Arc::new(OllamaBackend::new(&self.ollama_url, name, self.num_ctx))
+                        }
                         BackendKind::Local => {
                             self.connecting = true;
                             match crate::daemon::ensure::ensure_daemon_running(

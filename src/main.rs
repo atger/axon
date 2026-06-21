@@ -68,15 +68,18 @@ async fn main() -> color_eyre::Result<()> {
                 .unwrap_or_else(|| llm::local::resolve_cw(&model));
             Arc::new(DaemonBackend::new(port, &model, cw))
         }
-        BackendKind::Ollama => Arc::new(OllamaBackend::new(&ollama_url, &model)),
+        BackendKind::Ollama => {
+            let num_ctx = args.context_window.or(config.context_window);
+            Arc::new(OllamaBackend::new(&ollama_url, &model, num_ctx))
+        }
     };
 
     // Workflow subcommand (needs backend).
     if let Some(Command::Workflow(cmd)) = &args.command {
         match &cmd.action {
-            cli::WorkflowAction::Run { file, compile_only } => {
+            cli::WorkflowAction::Run { path, compile_only } => {
                 let engine = workflow::WorkflowEngine::new(backend);
-                return engine.run_workflow(file, *compile_only).await;
+                return engine.run_workflow(path, *compile_only).await;
             }
         }
     }

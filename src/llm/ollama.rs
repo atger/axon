@@ -11,14 +11,20 @@ use crate::session::{Message, Role};
 pub struct OllamaBackend {
     base_url: String,
     model: String,
+    num_ctx: Option<usize>,
     client: Client,
 }
 
 impl OllamaBackend {
-    pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        num_ctx: Option<usize>,
+    ) -> Self {
         Self {
             base_url: base_url.into(),
             model: model.into(),
+            num_ctx,
             client: Client::new(),
         }
     }
@@ -42,11 +48,14 @@ impl Backend for OllamaBackend {
         cancel: CancellationToken,
         tx: mpsc::Sender<StreamEvent>,
     ) -> Result<(), BackendError> {
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": messages.iter().map(msg_to_json).collect::<Vec<_>>(),
             "stream": true,
         });
+        if let Some(ctx) = self.num_ctx {
+            body["options"] = json!({ "num_ctx": ctx });
+        }
 
         let resp = self
             .client
@@ -107,6 +116,6 @@ impl Backend for OllamaBackend {
     }
 
     fn context_window(&self) -> usize {
-        4096
+        self.num_ctx.unwrap_or(4096)
     }
 }
