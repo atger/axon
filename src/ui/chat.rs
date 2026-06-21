@@ -50,22 +50,15 @@ impl ChatWidget {
                     lines.push(Line::default());
                 }
                 Role::User => {
-                    lines.push(Line::from(Span::styled(
-                        "you:",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    )));
                     for text_line in msg.content.lines() {
-                        lines.push(Line::from(format!("  {text_line}")));
+                        lines.push(Line::from(Span::styled(
+                            format!("  {text_line}"),
+                            Style::default().add_modifier(Modifier::ITALIC),
+                        )));
                     }
                     lines.push(Line::default());
                 }
                 Role::Assistant => {
-                    lines.push(Line::from(Span::styled(
-                        "axon:",
-                        Style::default().add_modifier(Modifier::BOLD),
-                    )));
                     render_content(&msg.content, &mut lines);
                     lines.push(Line::default());
                 }
@@ -74,10 +67,6 @@ impl ChatWidget {
 
         // In-progress streaming message
         if let Some(partial) = streaming {
-            lines.push(Line::from(Span::styled(
-                "axon:",
-                Style::default().add_modifier(Modifier::BOLD),
-            )));
             render_content(partial, &mut lines);
             // Blinking cursor
             lines.push(Line::from(Span::styled(

@@ -305,6 +305,10 @@ impl<'a> App<'a> {
                 }
                 return Ok(());
             }
+            (KeyModifiers::CONTROL, KeyCode::Char('d') | KeyCode::Char('D')) => {
+                self.running = false;
+                return Ok(());
+            }
             (_, KeyCode::PageUp) => {
                 self.user_scrolled = true;
                 self.chat.scroll_up(10);
