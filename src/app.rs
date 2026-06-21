@@ -144,9 +144,9 @@ impl<'a> App<'a> {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1), // status bar
                 Constraint::Min(5),    // chat
                 Constraint::Length(5), // input (min 3 + 2 borders)
+                Constraint::Length(1), // status bar
             ])
             .split(area);
 
@@ -160,13 +160,6 @@ impl<'a> App<'a> {
                 }
             }
         };
-        status::render(
-            frame,
-            chunks[0],
-            self.backend.model_name(),
-            self.context.branch(),
-            &gen_state,
-        );
 
         let streaming = match &self.generating {
             Generating::Active { partial, .. } => Some(partial.as_str()),
@@ -180,8 +173,15 @@ impl<'a> App<'a> {
             .filter(|m| m.role != crate::session::Role::System)
             .cloned()
             .collect();
-        self.chat.render(frame, chunks[1], &display_msgs, streaming);
-        self.input.render(frame, chunks[2]);
+        self.chat.render(frame, chunks[0], &display_msgs, streaming);
+        self.input.render(frame, chunks[1]);
+        status::render(
+            frame,
+            chunks[2],
+            self.backend.model_name(),
+            self.context.branch(),
+            &gen_state,
+        );
 
         // Confirmation overlay — rendered on top when awaiting user approval.
         if let Generating::AwaitingConfirm {

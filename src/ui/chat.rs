@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
 };
 
 use crate::session::{Message, Role};
@@ -50,11 +50,13 @@ impl ChatWidget {
                     lines.push(Line::default());
                 }
                 Role::User => {
+                    let w = area.width as usize;
                     for text_line in msg.content.lines() {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {text_line}"),
-                            Style::default().add_modifier(Modifier::ITALIC),
-                        )));
+                        let content = format!("  {text_line}");
+                        lines.push(Line::styled(
+                            format!("{content:<w$}"),
+                            Style::default().bg(Color::DarkGray).fg(Color::White),
+                        ));
                     }
                     lines.push(Line::default());
                 }
@@ -78,7 +80,7 @@ impl ChatWidget {
         }
 
         let total_lines = lines.len() as u16;
-        let visible = area.height.saturating_sub(2); // minus block borders
+        let visible = area.height;
         let max_scroll = total_lines.saturating_sub(visible);
         let scroll = self.scroll_offset.min(max_scroll);
         // Ratatui scroll is (row_from_top, col), we scroll from bottom
@@ -86,7 +88,6 @@ impl ChatWidget {
 
         frame.render_widget(
             Paragraph::new(lines)
-                .block(Block::bordered().title(" conversation "))
                 .wrap(Wrap { trim: false })
                 .scroll((scroll_from_top, 0)),
             area,
