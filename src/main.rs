@@ -11,8 +11,10 @@ mod context;
 mod daemon;
 mod llm;
 mod runner;
+mod server;
 mod session;
 mod skills;
+mod swarm;
 mod tools;
 mod ui;
 mod workflow;
@@ -35,6 +37,7 @@ async fn main() -> color_eyre::Result<()> {
             Command::Config(cmd) => return handle_config(cmd, &mut config),
             Command::Model(cmd) => return handle_model(cmd, &mut config),
             Command::Workflow(_) => {} // needs a backend — handled below
+            Command::Serve(_) => {}    // needs model/url — handled below
         }
     }
 
@@ -53,6 +56,13 @@ async fn main() -> color_eyre::Result<()> {
         .unwrap_or("http://localhost:11434")
         .to_string();
     let no_download = args.no_download || config.no_download.unwrap_or(false);
+
+    // Swarm dashboard: builds its own AutoAgents (Ollama) provider, not the
+    // legacy Backend, so handle it before any daemon/backend setup.
+    if let Some(Command::Serve(cmd)) = &args.command {
+        let swarm = swarm::Swarm::new(&model, &ollama_url).await?;
+        return server::run_server(swarm, cmd.host.clone(), cmd.port).await;
+    }
 
     if args.daemon {
         return daemon::run_daemon(&model, no_download, args.context_window).await;
@@ -77,9 +87,9 @@ async fn main() -> color_eyre::Result<()> {
     // Workflow subcommand (needs backend).
     if let Some(Command::Workflow(cmd)) = &args.command {
         match &cmd.action {
-            cli::WorkflowAction::Run { path, compile_only } => {
+            cli::WorkflowAction::Run { file, compile_only } => {
                 let engine = workflow::WorkflowEngine::new(backend);
-                return engine.run_workflow(path, *compile_only).await;
+                return engine.run_workflow(file, *compile_only).await;
             }
         }
     }

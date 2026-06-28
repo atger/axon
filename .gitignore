@@ -16,6 +16,11 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
+# Built dashboard assets — regenerate with `trunk build` in frontend/.
+# The folder itself is kept (.gitkeep) so rust-embed compiles on a fresh checkout.
+/frontend/dist/*
+!/frontend/dist/.gitkeep
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

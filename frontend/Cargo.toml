@@ -1,0 +1,20 @@
+[package]
+name = "axon-dashboard"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+leptos = { version = "=0.8.20", features = ["csr"] }
+gloo-net = "0.7"
+gloo-timers = { version = "0.3", features = ["futures"] }
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Location"] }
+
+# Standalone workspace so the root `cargo build` (axon) never tries to build this
+# wasm crate; it is built independently by Trunk into `frontend/dist`.
+[workspace]

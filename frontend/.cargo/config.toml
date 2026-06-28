@@ -1,0 +1,5 @@
+# wasm-bindgen >= 0.2.121 emits an externref table and requires these wasm
+# target features to be enabled when compiling, otherwise the CLI fails with
+# "failed to find the `__wbindgen_externref_table_alloc` function".
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+reference-types,+multivalue"]

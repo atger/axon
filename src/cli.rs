@@ -12,6 +12,21 @@ pub enum Command {
     Model(ModelCmd),
     /// Define and execute multi-step AI workflows.
     Workflow(WorkflowCmd),
+    /// Run the web dashboard for the agent swarm.
+    Serve(ServeCmd),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ServeCmd {
+    /// Address to bind. Use 0.0.0.0 to expose on the network (no auth — see warning).
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+    /// Port to listen on.
+    #[arg(long, default_value_t = 8420)]
+    pub port: u16,
+    /// Max agents decoding concurrently (real parallelism needs OLLAMA_NUM_PARALLEL).
+    #[arg(long, default_value_t = 1)]
+    pub max_concurrency: usize,
 }
 
 #[derive(clap::Args, Debug)]
