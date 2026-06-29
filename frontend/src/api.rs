@@ -18,6 +18,57 @@ pub struct AgentInfo {
     pub role: String,
     #[serde(default)]
     pub perpetual: bool,
+    #[serde(default)]
+    pub def_name: Option<String>,
+}
+
+/// Mirrors `crate::swarm::teams::Team`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Team {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+/// Mirrors `crate::swarm::teams::AgentDef` (a saved agent configuration).
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct AgentDef {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub team_id: String,
+    pub name: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub instructions: String,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default = "default_policy")]
+    pub policy: String,
+    #[serde(default)]
+    pub memory_window: Option<usize>,
+    #[serde(default)]
+    pub max_turns: Option<usize>,
+    #[serde(default)]
+    pub schedule_mins: Option<u64>,
+    #[serde(default)]
+    pub task: Option<String>,
+    #[serde(default)]
+    pub builtin: bool,
+}
+
+fn default_policy() -> String {
+    "auto_approve".to_string()
+}
+
+/// Mirrors `crate::swarm::teams::TeamWithAgents`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct TeamWithAgents {
+    pub team: Team,
+    #[serde(default)]
+    pub agents: Vec<AgentDef>,
 }
 
 /// Mirrors `crate::swarm::store::Task`.
@@ -47,12 +98,14 @@ pub struct SwarmEvent {
 #[derive(Deserialize)]
 struct ModelsResp {
     current: String,
+    #[serde(default)]
+    models: Vec<String>,
 }
 
 #[derive(Serialize)]
 struct SpawnReq {
+    def_id: String,
     task: String,
-    policy: String,
 }
 
 pub async fn fetch_agents() -> Vec<AgentInfo> {
@@ -73,10 +126,77 @@ pub async fn fetch_model() -> String {
     }
 }
 
-pub async fn spawn_agent(task: String, policy: String) -> Result<(), String> {
+/// The list of selectable models (installed in Ollama; current model first).
+pub async fn fetch_models() -> Vec<String> {
+    match Request::get("/api/models").send().await {
+        Ok(resp) => resp
+            .json::<ModelsResp>()
+            .await
+            .map(|m| m.models)
+            .unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+pub async fn spawn_agent(def_id: String, task: String) -> Result<(), String> {
     Request::post("/api/agents")
-        .json(&SpawnReq { task, policy })
+        .json(&SpawnReq { def_id, task })
         .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+// -- teams & agent definitions ---------------------------------------------
+
+pub async fn fetch_teams() -> Vec<TeamWithAgents> {
+    match Request::get("/api/teams").send().await {
+        Ok(resp) => resp.json().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+pub async fn create_team(name: &str) -> Result<(), String> {
+    Request::post("/api/teams")
+        .json(&serde_json::json!({ "name": name }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn delete_team(id: &str) -> Result<(), String> {
+    Request::delete(&format!("/api/teams/{id}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn create_def(team_id: &str, def: &AgentDef) -> Result<(), String> {
+    Request::post(&format!("/api/teams/{team_id}/agents"))
+        .json(def)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn update_def(id: &str, def: &AgentDef) -> Result<(), String> {
+    Request::put(&format!("/api/agent-defs/{id}"))
+        .json(def)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn delete_def(id: &str) -> Result<(), String> {
+    Request::delete(&format!("/api/agent-defs/{id}"))
         .send()
         .await
         .map_err(|e| e.to_string())?;

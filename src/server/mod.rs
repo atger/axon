@@ -15,16 +15,17 @@ use axum::{
     },
     http::{StatusCode, Uri, header},
     response::{Html, IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 
 mod tasks;
+mod teams;
 use color_eyre::eyre::{Result, WrapErr};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast;
 
-use crate::swarm::{Swarm, SpawnSpec, agent::ApprovalPolicy};
+use crate::swarm::{Swarm, teams as defstore};
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "frontend/dist"]
@@ -36,6 +37,10 @@ pub async fn run_server(swarm: Arc<Swarm>, host: String, port: u16) -> Result<()
         .route("/api/agents", get(list_agents).post(spawn_agent))
         .route("/api/agents/cancel-all", post(cancel_all))
         .route("/api/agents/:id", get(get_agent).delete(cancel_agent))
+        .route("/api/teams", get(teams::list).post(teams::create))
+        .route("/api/teams/:id", put(teams::rename).delete(teams::delete))
+        .route("/api/teams/:id/agents", post(teams::create_def))
+        .route("/api/agent-defs/:id", put(teams::update_def).delete(teams::delete_def))
         .route("/api/models", get(list_models))
         .route("/api/tasks", get(tasks::list))
         .route("/api/tasks/history", get(tasks::history))
@@ -79,9 +84,8 @@ async fn list_agents(State(swarm): State<Arc<Swarm>>) -> Json<serde_json::Value>
 
 #[derive(Deserialize)]
 struct SpawnRequest {
+    def_id: String,
     task: String,
-    #[serde(default)]
-    policy: ApprovalPolicy,
 }
 
 async fn spawn_agent(
@@ -91,13 +95,18 @@ async fn spawn_agent(
     if req.task.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, "task must not be empty").into_response();
     }
-    match swarm
-        .spawn(SpawnSpec {
-            task: req.task,
-            policy: req.policy,
-        })
-        .await
-    {
+    let def = match defstore::resolve_def(&req.def_id) {
+        Ok(Some(def)) => def,
+        Ok(None) => return (StatusCode::BAD_REQUEST, "no such agent definition").into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    match swarm.spawn_from_def(def, req.task).await {
         Ok(id) => (StatusCode::CREATED, Json(json!({ "id": id }))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -128,7 +137,32 @@ async fn cancel_all(State(swarm): State<Arc<Swarm>>) -> StatusCode {
 }
 
 async fn list_models(State(swarm): State<Arc<Swarm>>) -> Json<serde_json::Value> {
-    Json(json!({ "current": swarm.model(), "models": [swarm.model()] }))
+    let current = swarm.model().to_string();
+    let mut models = ollama_models(swarm.ollama_url()).await;
+    // Ensure the current model is always selectable, even if `/api/tags` failed.
+    if !models.iter().any(|m| m == &current) {
+        models.insert(0, current.clone());
+    }
+    Json(json!({ "current": current, "models": models }))
+}
+
+/// Best-effort list of installed Ollama model names via `GET {url}/api/tags`.
+async fn ollama_models(url: &str) -> Vec<String> {
+    let endpoint = format!("{}/api/tags", url.trim_end_matches('/'));
+    let Ok(resp) = reqwest::get(&endpoint).await else {
+        return Vec::new();
+    };
+    let Ok(body) = resp.json::<serde_json::Value>().await else {
+        return Vec::new();
+    };
+    body.get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------

@@ -18,8 +18,10 @@ use autoagents::llm::ToolCall;
 use autoagents_toolkit::tools::filesystem::{DeleteFile, ListDir, ReadFile, SearchFile, WriteFile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
 
-use crate::swarm::tools::{AddTaskTool, RunCommandTool, WebSearchTool};
+use crate::swarm::SpawnCmd;
+use crate::swarm::tools::{AddTaskTool, RunCommandTool, SpawnAgentTool, WebSearchTool};
 
 /// Approval policy for generic, user-spawned `Coder` agents (the built-in
 /// pipeline roles are constrained by their toolset instead, and run AutoApprove).
@@ -55,15 +57,43 @@ const DESTRUCTIVE_TOOLS: &[&str] = &[
     "create_dir",
 ];
 
+/// Read-only filesystem tools, always granted to a `Coder` regardless of the
+/// configured toolset (an agent that cannot read is useless).
+pub const READONLY_TOOLS: &[&str] = &["read_file", "list_dir", "search_file"];
+
+/// Every tool a generic `Coder` agent can be granted (the full default set).
+pub const ALL_CODER_TOOLS: &[&str] = &[
+    "read_file",
+    "write_file",
+    "list_dir",
+    "search_file",
+    "delete_file",
+    "run_command",
+    "web_search",
+];
+
 pub fn is_destructive(tool_name: &str) -> bool {
     DESTRUCTIVE_TOOLS.contains(&tool_name)
 }
 
-const CODER_PROMPT: &str = "You are axon, a local AI coding agent using the ReAct (Reasoning + Acting) pattern. \
+pub const CODER_PROMPT: &str = "You are axon, a local AI coding agent using the ReAct (Reasoning + Acting) pattern. \
 Solve software tasks by alternating Thought, Action (tool call), and Observation until done. \
 Tools: read_file, write_file, list_dir, search_file, delete_file (filesystem); \
 run_command (shell, via sh -c); web_search. Be concise; make incremental changes; use exact paths; \
 never delete or overwrite without clear intent. When done, summarize what you did.";
+
+/// General-purpose research agent (distinct from the pipeline's frontend-specific
+/// `RESEARCHER_PROMPT`): gathers information from the web and the local codebase.
+pub const RESEARCH_AGENT_PROMPT: &str = "You are a research agent using the ReAct pattern. Investigate the \
+user's question thoroughly: use web_search for external information and read_file/list_dir/search_file to \
+study the local codebase. Cross-check sources, be concise, and finish with a clear, well-organized summary \
+of your findings (with sources where relevant). Do not modify any files.";
+
+/// Read-only code-review agent.
+pub const REVIEWER_PROMPT: &str = "You are a code-review agent using the ReAct pattern. Read the relevant \
+code with read_file/list_dir/search_file and review it for correctness bugs, security risks, and concrete \
+improvements. Cite findings as `file:line` and explain the impact and a suggested fix for each. Be \
+specific and prioritize high-confidence issues. You are read-only — do NOT edit, write, or run anything.";
 
 const RESEARCHER_PROMPT: &str = "You are axon's frontend researcher. Study how OTHER agentic / AI-agent \
 applications design their dashboards, UX, and features (use web_search). Use list_dir/read_file under \
@@ -120,14 +150,53 @@ pub struct CodingAgent {
     name: String,
     role: Role,
     control: Arc<AgentControl>,
+    /// System prompt. For system roles this is the role's constant; for a
+    /// configured `Coder` it is the agent definition's instructions.
+    prompt: String,
+    /// When `Some`, restrict a `Coder`'s toolset to these tool names (read-only
+    /// tools are always retained). `None` ⇒ the full default `Coder` toolset.
+    allowed_tools: Option<Vec<String>>,
+    /// Channel for the `spawn_agent` tool (proactive agents delegate through it).
+    /// `None` ⇒ the agent cannot spawn others.
+    spawn_tx: Option<UnboundedSender<SpawnCmd>>,
 }
 
 impl CodingAgent {
+    /// A built-in system-pipeline agent: prompt + tools fixed by role.
     pub fn with_role(name: impl Into<String>, role: Role, control: Arc<AgentControl>) -> Self {
+        let prompt = match role {
+            Role::Coder => CODER_PROMPT,
+            Role::Researcher => RESEARCHER_PROMPT,
+            Role::Planner => PLANNER_PROMPT,
+            Role::Developer => DEVELOPER_PROMPT,
+        }
+        .to_string();
         Self {
             name: name.into(),
             role,
             control,
+            prompt,
+            allowed_tools: None,
+            spawn_tx: None,
+        }
+    }
+
+    /// A configured generic `Coder` agent: custom system prompt, an optional
+    /// restricted toolset, and an optional channel for spawning other agents.
+    pub fn coder(
+        name: impl Into<String>,
+        control: Arc<AgentControl>,
+        prompt: String,
+        allowed_tools: Option<Vec<String>>,
+        spawn_tx: Option<UnboundedSender<SpawnCmd>>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            role: Role::Coder,
+            control,
+            prompt,
+            allowed_tools,
+            spawn_tx,
         }
     }
 }
@@ -146,12 +215,7 @@ impl AgentDeriveT for CodingAgent {
     }
 
     fn description(&self) -> &str {
-        match self.role {
-            Role::Coder => CODER_PROMPT,
-            Role::Researcher => RESEARCHER_PROMPT,
-            Role::Planner => PLANNER_PROMPT,
-            Role::Developer => DEVELOPER_PROMPT,
-        }
+        &self.prompt
     }
 
     fn output_schema(&self) -> Option<Value> {
@@ -160,15 +224,31 @@ impl AgentDeriveT for CodingAgent {
 
     fn tools(&self) -> Vec<Box<dyn ToolT>> {
         match self.role {
-            Role::Coder => vec![
-                Box::new(ReadFile::new()),
-                Box::new(WriteFile::new()),
-                Box::new(ListDir::new()),
-                Box::new(SearchFile::new(100)),
-                Box::new(DeleteFile::new()),
-                Box::new(RunCommandTool {}),
-                Box::new(WebSearchTool {}),
-            ],
+            Role::Coder => {
+                let mut all: Vec<Box<dyn ToolT>> = vec![
+                    Box::new(ReadFile::new()),
+                    Box::new(WriteFile::new()),
+                    Box::new(ListDir::new()),
+                    Box::new(SearchFile::new(100)),
+                    Box::new(DeleteFile::new()),
+                    Box::new(RunCommandTool {}),
+                    Box::new(WebSearchTool {}),
+                    Box::new(AddTaskTool {}),
+                ];
+                if let Some(tx) = &self.spawn_tx {
+                    all.push(Box::new(SpawnAgentTool { tx: tx.clone() }));
+                }
+                match &self.allowed_tools {
+                    // Keep read-only tools always; otherwise honor the allow-list.
+                    Some(allowed) => all
+                        .into_iter()
+                        .filter(|t| {
+                            READONLY_TOOLS.contains(&t.name()) || allowed.iter().any(|a| a == t.name())
+                        })
+                        .collect(),
+                    None => all,
+                }
+            }
             Role::Researcher => vec![
                 Box::new(WebSearchTool {}),
                 Box::new(ReadFile::new()),

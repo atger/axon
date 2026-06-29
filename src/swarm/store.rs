@@ -19,7 +19,7 @@ static DB: OnceLock<Mutex<Connection>> = OnceLock::new();
 
 /// Open (once) and migrate the database. Panics only if the data dir or DB file
 /// cannot be created — without it the server cannot function.
-fn conn() -> MutexGuard<'static, Connection> {
+pub(super) fn conn() -> MutexGuard<'static, Connection> {
     DB.get_or_init(|| {
         let dir = axon_data_dir().expect("axon data dir");
         fs::create_dir_all(&dir).expect("create ~/.axon");
@@ -35,13 +35,42 @@ fn conn() -> MutexGuard<'static, Connection> {
                  source      TEXT NOT NULL DEFAULT 'planner',
                  created     TEXT NOT NULL,
                  updated     TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS teams (
+                 id      TEXT PRIMARY KEY,
+                 name    TEXT NOT NULL,
+                 created TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS agent_defs (
+                 id            TEXT PRIMARY KEY,
+                 team_id       TEXT NOT NULL,
+                 name          TEXT NOT NULL,
+                 model         TEXT,
+                 instructions  TEXT NOT NULL DEFAULT '',
+                 tools         TEXT NOT NULL DEFAULT '',
+                 policy        TEXT NOT NULL DEFAULT 'auto_approve',
+                 memory_window INTEGER,
+                 max_turns     INTEGER,
+                 schedule_mins INTEGER,
+                 task          TEXT,
+                 created       TEXT NOT NULL,
+                 updated       TEXT NOT NULL
              );",
         )
-        .expect("migrate tasks table");
+        .expect("migrate tables");
+        // Idempotent upgrades for DBs whose agent_defs predate the schedule
+        // columns (errors when the column already exists are expected/ignored).
+        let _ = c.execute("ALTER TABLE agent_defs ADD COLUMN schedule_mins INTEGER", []);
+        let _ = c.execute("ALTER TABLE agent_defs ADD COLUMN task TEXT", []);
         Mutex::new(c)
     })
     .lock()
     .expect("task db mutex poisoned")
+}
+
+/// Slugify helper shared with the teams module for id generation.
+pub(super) fn slug(s: &str) -> String {
+    slugify(s)
 }
 
 const ACTIVE: &str = "('proposed','accepted','implementing')";

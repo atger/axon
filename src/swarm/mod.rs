@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod store;
+pub mod teams;
 pub mod tools;
 
 use std::collections::{HashMap, VecDeque};
@@ -23,10 +24,11 @@ use autoagents::llm::builder::LLMBuilder;
 use autoagents::protocol::{Event, SubmissionId};
 use color_eyre::eyre::{Result, WrapErr};
 use serde::Serialize;
-use tokio::sync::{Mutex, RwLock, broadcast};
+use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tokio_stream::StreamExt;
 
 use agent::{AgentControl, ApprovalPolicy, CodingAgent, Role};
+use teams::AgentDef;
 
 const RESEARCHER_ID: &str = "researcher";
 const PLANNER_ID: &str = "planner";
@@ -62,6 +64,9 @@ pub struct AgentInfo {
     pub role: Role,
     /// True for built-in system agents (the pipeline); excluded from cancel-all.
     pub perpetual: bool,
+    /// Name of the agent definition this was spawned from (e.g. "Coder"); `None`
+    /// for the built-in pipeline agents.
+    pub def_name: Option<String>,
 }
 
 struct AgentEntry {
@@ -76,10 +81,56 @@ pub struct SwarmEvent {
     pub event: serde_json::Value,
 }
 
-/// Parameters for spawning a generic (user) agent.
-pub struct SpawnSpec {
+/// Internal construction parameters shared by the system pipeline and configured
+/// user agents.
+struct AgentSpec {
+    id: String,
+    role: Role,
+    policy: ApprovalPolicy,
+    llm: Arc<dyn LLMProvider>,
+    /// `None` ⇒ use the role's default prompt (built-in pipeline agents); `Some`
+    /// ⇒ a configured `Coder`'s custom instructions.
+    prompt: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    memory_window: usize,
+    max_turns: usize,
+    model_label: String,
+    perpetual: bool,
+    def_name: Option<String>,
+    spawn_tx: Option<mpsc::UnboundedSender<SpawnCmd>>,
+}
+
+/// A request, raised by an agent's `spawn_agent` tool, for the swarm to spawn
+/// another configured agent. Routed through a channel so tools hold no `Arc`
+/// back to the swarm.
+pub struct SpawnCmd {
+    pub def_id: String,
     pub task: String,
-    pub policy: ApprovalPolicy,
+}
+
+/// A running proactive (scheduled) agent's loop parameters.
+#[derive(Clone)]
+struct ScheduleEntry {
+    interval: Duration,
+    task: String,
+}
+
+/// Signature of a def's scheduling-relevant config, used to detect changes on
+/// resync (so unrelated CRUD doesn't needlessly restart agents).
+fn def_sig(def: &AgentDef) -> String {
+    format!(
+        "{:?}",
+        (
+            def.schedule_mins,
+            &def.task,
+            &def.instructions,
+            &def.tools,
+            &def.model,
+            def.memory_window,
+            def.max_turns,
+            def.policy,
+        )
+    )
 }
 
 /// Tracks the suggestion currently being implemented by the developer agent.
@@ -94,6 +145,7 @@ pub struct Swarm {
     runtime: Arc<SingleThreadedRuntime>,
     llm: Arc<dyn LLMProvider>,
     model: String,
+    ollama_url: String,
     agents: RwLock<HashMap<String, AgentEntry>>,
     sub_index: RwLock<HashMap<SubmissionId, String>>,
     events_tx: broadcast::Sender<SwarmEvent>,
@@ -103,6 +155,12 @@ pub struct Swarm {
     max_attempts: usize,
     impl_state: Mutex<Option<ImplState>>,
     accept_queue: Mutex<VecDeque<String>>,
+    /// Sender for `spawn_agent` tool requests (drained by `spawn_pump`).
+    spawn_tx: mpsc::UnboundedSender<SpawnCmd>,
+    /// Running proactive agents, keyed by agent id (for re-arming on completion).
+    scheduled: Mutex<HashMap<String, ScheduleEntry>>,
+    /// Maps a scheduled def id → (running agent id, config signature).
+    sched_index: Mutex<HashMap<String, (String, String)>>,
     _env: Mutex<Environment>,
 }
 
@@ -131,12 +189,14 @@ impl Swarm {
             .await
             .wrap_err("failed to subscribe to runtime events")?;
         let (events_tx, _) = broadcast::channel(1024);
+        let (spawn_tx, spawn_rx) = mpsc::unbounded_channel();
         let _handle = env.run();
 
         let swarm = Arc::new(Self {
             runtime,
             llm,
             model: model.to_string(),
+            ollama_url: ollama_url.to_string(),
             agents: RwLock::new(HashMap::new()),
             sub_index: RwLock::new(HashMap::new()),
             events_tx,
@@ -145,10 +205,14 @@ impl Swarm {
             max_attempts,
             impl_state: Mutex::new(None),
             accept_queue: Mutex::new(VecDeque::new()),
+            spawn_tx,
+            scheduled: Mutex::new(HashMap::new()),
+            sched_index: Mutex::new(HashMap::new()),
             _env: Mutex::new(env),
         });
 
         swarm.clone().spawn_event_pump(event_stream);
+        swarm.clone().spawn_pump(spawn_rx);
 
         if research_interval.is_some() {
             swarm
@@ -156,7 +220,20 @@ impl Swarm {
                 .await
                 .wrap_err("failed to start research pipeline")?;
         }
+        // Start any proactive (scheduled) user agents saved in the DB.
+        swarm.resync_schedules().await;
         Ok(swarm)
+    }
+
+    /// Drain `spawn_agent` tool requests and spawn the requested defs.
+    fn spawn_pump(self: Arc<Self>, mut rx: mpsc::UnboundedReceiver<SpawnCmd>) {
+        tokio::spawn(async move {
+            while let Some(cmd) = rx.recv().await {
+                if let Ok(Some(def)) = teams::resolve_def(&cmd.def_id) {
+                    let _ = self.spawn_from_def(def, cmd.task).await;
+                }
+            }
+        });
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<SwarmEvent> {
@@ -175,16 +252,27 @@ impl Swarm {
         &self.model
     }
 
+    pub fn ollama_url(&self) -> &str {
+        &self.ollama_url
+    }
+
     // -- agent construction ------------------------------------------------
 
-    /// Build and register an actor (does not publish a task).
-    async fn build_agent(&self, id: &str, role: Role, policy: ApprovalPolicy) -> Result<()> {
-        let control = AgentControl::new(policy);
-        let agent = ReActAgent::new(CodingAgent::with_role(id, role, control.clone()));
-        let topic = Topic::<Task>::new(id);
-        let memory = Box::new(SlidingWindowMemory::new(20));
+    /// Build and register an actor from a fully-resolved spec (does not publish a
+    /// task). Shared by the system pipeline and configured user agents.
+    async fn build_agent(&self, spec: AgentSpec) -> Result<()> {
+        let control = AgentControl::new(spec.policy);
+        let coding = match spec.prompt {
+            Some(prompt) => {
+                CodingAgent::coder(&spec.id, control.clone(), prompt, spec.allowed_tools, spec.spawn_tx)
+            }
+            None => CodingAgent::with_role(&spec.id, spec.role, control.clone()),
+        };
+        let agent = ReActAgent::with_max_turns(coding, spec.max_turns);
+        let topic = Topic::<Task>::new(&spec.id);
+        let memory = Box::new(SlidingWindowMemory::new(spec.memory_window));
         let _ = AgentBuilder::<_, ActorAgent>::new(agent)
-            .llm(self.llm.clone())
+            .llm(spec.llm)
             .runtime(self.runtime.clone())
             .subscribe(topic)
             .memory(memory)
@@ -192,19 +280,56 @@ impl Swarm {
             .await
             .wrap_err("failed to build agent")?;
         let info = AgentInfo {
-            id: id.to_string(),
+            id: spec.id.clone(),
             task: String::new(),
-            model: self.model.clone(),
-            policy,
+            model: spec.model_label,
+            policy: spec.policy,
             status: AgentStatus::Queued,
-            role,
-            perpetual: role != Role::Coder,
+            role: spec.role,
+            perpetual: spec.perpetual,
+            def_name: spec.def_name,
         };
         self.agents
             .write()
             .await
-            .insert(id.to_string(), AgentEntry { info, control });
+            .insert(spec.id, AgentEntry { info, control });
         Ok(())
+    }
+
+    /// Build a system-pipeline agent (role-fixed prompt/tools, default window &
+    /// turns, the shared default model).
+    async fn build_system_agent(&self, id: &str, role: Role) -> Result<()> {
+        self.build_agent(AgentSpec {
+            id: id.to_string(),
+            role,
+            policy: ApprovalPolicy::AutoApprove,
+            llm: self.llm.clone(),
+            prompt: None,
+            allowed_tools: None,
+            memory_window: 20,
+            max_turns: 10,
+            model_label: self.model.clone(),
+            perpetual: true,
+            def_name: None,
+            spawn_tx: None,
+        })
+        .await
+    }
+
+    /// Resolve the LLM provider for a model: reuse the shared one when the model
+    /// matches, otherwise build a per-agent Ollama provider.
+    fn provider_for(&self, model: &str) -> Result<Arc<dyn LLMProvider>> {
+        if model == self.model {
+            Ok(self.llm.clone())
+        } else {
+            let p: Arc<dyn LLMProvider> =
+                LLMBuilder::<autoagents::llm::backends::ollama::Ollama>::new()
+                    .base_url(&self.ollama_url)
+                    .model(model)
+                    .build()
+                    .wrap_err_with(|| format!("failed to build provider for model `{model}`"))?;
+            Ok(p)
+        }
     }
 
     /// Publish a task to an existing agent, mapping its submission id.
@@ -223,18 +348,127 @@ impl Swarm {
         Ok(())
     }
 
-    /// Spawn a generic user agent and give it a task.
-    pub async fn spawn(&self, spec: SpawnSpec) -> Result<String> {
+    /// Spawn a user agent from a saved definition and give it a task.
+    pub async fn spawn_from_def(&self, def: AgentDef, task: String) -> Result<String> {
         let id = format!("agent-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
-        self.build_agent(&id, Role::Coder, spec.policy).await?;
-        self.publish_to(&id, spec.task).await?;
+        let model = def.model.clone().unwrap_or_else(|| self.model.clone());
+        let llm = self.provider_for(&model)?;
+        self.build_agent(AgentSpec {
+            id: id.clone(),
+            role: Role::Coder,
+            policy: def.policy,
+            llm,
+            prompt: Some(def.instructions),
+            allowed_tools: Some(def.tools),
+            memory_window: def.memory_window.unwrap_or(20),
+            max_turns: def.max_turns.unwrap_or(10),
+            model_label: model,
+            perpetual: false,
+            def_name: Some(def.name),
+            spawn_tx: Some(self.spawn_tx.clone()),
+        })
+        .await?;
+        self.publish_to(&id, task).await?;
         Ok(id)
     }
 
+    // -- proactive (scheduled) agents --------------------------------------
+
+    /// Reconcile running scheduled agents with the saved definitions: start newly
+    /// scheduled defs, stop ones that are gone/disabled, and restart changed ones.
+    pub async fn resync_schedules(self: &Arc<Self>) {
+        // Desired: user defs with a positive interval and a non-empty recurring task.
+        let mut desired: HashMap<String, AgentDef> = HashMap::new();
+        if let Ok(teams) = teams::all_teams() {
+            for tw in teams {
+                for def in tw.agents {
+                    let has_task = def.task.as_deref().map(|t| !t.trim().is_empty()).unwrap_or(false);
+                    if !def.builtin && def.schedule_mins.unwrap_or(0) > 0 && has_task {
+                        desired.insert(def.id.clone(), def);
+                    }
+                }
+            }
+        }
+        // Stop schedules that are gone or whose config changed (changed ones are
+        // re-created below).
+        let current: Vec<(String, String)> = self
+            .sched_index
+            .lock()
+            .await
+            .iter()
+            .map(|(def_id, (_, sig))| (def_id.clone(), sig.clone()))
+            .collect();
+        for (def_id, sig) in current {
+            let keep = desired.get(&def_id).map(|d| def_sig(d) == sig).unwrap_or(false);
+            if !keep {
+                self.remove_schedule(&def_id).await;
+            }
+        }
+        // Start any desired schedule not currently running.
+        for (def_id, def) in desired {
+            let running = self.sched_index.lock().await.contains_key(&def_id);
+            if !running {
+                let _ = self.start_schedule(def).await;
+            }
+        }
+    }
+
+    /// Build and launch one proactive agent for `def`, and register its loop.
+    async fn start_schedule(self: &Arc<Self>, def: AgentDef) -> Result<()> {
+        let Some(mins) = def.schedule_mins else {
+            return Ok(());
+        };
+        let task = def.task.clone().unwrap_or_default();
+        if mins == 0 || task.trim().is_empty() {
+            return Ok(());
+        }
+        let interval = Duration::from_secs(mins * 60);
+        let agent_id = format!("sched-{}-{}", def.id, self.next_id.fetch_add(1, Ordering::SeqCst));
+        let model = def.model.clone().unwrap_or_else(|| self.model.clone());
+        let llm = self.provider_for(&model)?;
+        self.build_agent(AgentSpec {
+            id: agent_id.clone(),
+            role: Role::Coder,
+            policy: def.policy,
+            llm,
+            prompt: Some(def.instructions.clone()),
+            allowed_tools: Some(def.tools.clone()),
+            memory_window: def.memory_window.unwrap_or(20),
+            max_turns: def.max_turns.unwrap_or(10),
+            model_label: model,
+            perpetual: true,
+            def_name: Some(def.name.clone()),
+            spawn_tx: Some(self.spawn_tx.clone()),
+        })
+        .await?;
+        self.scheduled
+            .lock()
+            .await
+            .insert(agent_id.clone(), ScheduleEntry { interval, task: task.clone() });
+        self.sched_index
+            .lock()
+            .await
+            .insert(def.id.clone(), (agent_id.clone(), def_sig(&def)));
+        self.publish_to(&agent_id, task).await?;
+        Ok(())
+    }
+
+    /// Stop and deregister the proactive agent for `def_id` (if any).
+    async fn remove_schedule(&self, def_id: &str) {
+        let Some((agent_id, _)) = self.sched_index.lock().await.remove(def_id) else {
+            return;
+        };
+        self.scheduled.lock().await.remove(&agent_id);
+        if let Some(entry) = self.agents.write().await.get_mut(&agent_id) {
+            entry.control.cancel();
+            entry.info.status = AgentStatus::Cancelled;
+        }
+    }
+
     async fn spawn_system_agents(&self) -> Result<()> {
-        self.build_agent(RESEARCHER_ID, Role::Researcher, ApprovalPolicy::AutoApprove).await?;
-        self.build_agent(PLANNER_ID, Role::Planner, ApprovalPolicy::AutoApprove).await?;
-        self.build_agent(DEVELOPER_ID, Role::Developer, ApprovalPolicy::AutoApprove).await?;
+        self.build_system_agent(RESEARCHER_ID, Role::Researcher).await?;
+        self.build_system_agent(PLANNER_ID, Role::Planner).await?;
+        self.build_system_agent(DEVELOPER_ID, Role::Developer).await?;
         self.publish_to(RESEARCHER_ID, RESEARCH_TASK.to_string()).await?;
         Ok(())
     }
@@ -347,9 +581,44 @@ impl Swarm {
                         // Planner only runs after a human accept; its plan goes to the developer.
                         PLANNER_ID => self.on_planner_done(result).await,
                         DEVELOPER_ID => self.clone().spawn_finish_developer(result),
-                        _ => {}
+                        // A proactive user agent finished a cycle: refresh the queue
+                        // (it may have added tasks) and re-arm after its interval.
+                        _ => self.on_scheduled_done(&agent_id).await,
                     }
                 }
+
+                // Proactive agents also re-arm after a failed cycle, so a transient
+                // error doesn't permanently stop the schedule.
+                if matches!(event_status(&event), Some(AgentStatus::Error)) {
+                    self.on_scheduled_done(&agent_id).await;
+                }
+            }
+        });
+    }
+
+    /// A proactive (scheduled) user agent finished a cycle: refresh the task
+    /// queue (it may have enqueued work for review) and re-publish its recurring
+    /// task after the configured interval, unless it has since been cancelled or
+    /// rescheduled.
+    async fn on_scheduled_done(self: &Arc<Self>, agent_id: &str) {
+        let Some(entry) = self.scheduled.lock().await.get(agent_id).cloned() else {
+            return; // not a scheduled agent
+        };
+        self.broadcast_control("TasksChanged");
+        let me = Arc::clone(self);
+        let id = agent_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(entry.interval).await;
+            let cancelled = me
+                .agents
+                .read()
+                .await
+                .get(&id)
+                .map(|e| e.control.is_cancelled())
+                .unwrap_or(true);
+            let still_scheduled = me.scheduled.lock().await.contains_key(&id);
+            if !cancelled && still_scheduled {
+                let _ = me.publish_to(&id, entry.task).await;
             }
         });
     }

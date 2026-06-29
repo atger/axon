@@ -8,7 +8,9 @@ use autoagents_derive::{ToolInput, tool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::Command;
+use tokio::sync::mpsc::UnboundedSender;
 
+use crate::swarm::SpawnCmd;
 use crate::swarm::store;
 
 #[derive(Serialize, Deserialize, ToolInput, Debug)]
@@ -44,6 +46,45 @@ impl ToolRuntime for AddTaskTool {
         let id = store::add_task(&args.title, &args.description, &args.tags, &args.body)
             .map_err(|e| ToolCallError::RuntimeError(e.to_string().into()))?;
         Ok(format!("added task `{id}`").into())
+    }
+}
+
+#[derive(Serialize, Deserialize, ToolInput, Debug)]
+pub struct SpawnAgentArgs {
+    #[input(
+        description = "Definition id of the agent to spawn (e.g. 'axon-coder', 'axon-researcher', or a user agent's id)"
+    )]
+    def_id: String,
+    #[input(description = "The task for the spawned agent to work on")]
+    task: String,
+}
+
+/// Lets a (typically proactive) agent delegate by spawning another configured
+/// agent. The spawn is performed by the swarm via a channel, so the tool holds
+/// no reference back to the swarm (no `Arc` cycle).
+#[tool(
+    name = "spawn_agent",
+    description = "Spawn another configured agent (by its definition id) to work on a task in parallel.",
+    input = SpawnAgentArgs
+)]
+pub struct SpawnAgentTool {
+    pub tx: UnboundedSender<SpawnCmd>,
+}
+
+#[async_trait]
+impl ToolRuntime for SpawnAgentTool {
+    async fn execute(&self, args: Value) -> Result<Value, ToolCallError> {
+        let args: SpawnAgentArgs = serde_json::from_value(args)?;
+        if args.task.trim().is_empty() {
+            return Err(ToolCallError::RuntimeError("task must not be empty".into()));
+        }
+        self.tx
+            .send(SpawnCmd {
+                def_id: args.def_id.clone(),
+                task: args.task,
+            })
+            .map_err(|e| ToolCallError::RuntimeError(format!("failed to queue spawn: {e}").into()))?;
+        Ok(format!("requested spawn of agent `{}`", args.def_id).into())
     }
 }
 
