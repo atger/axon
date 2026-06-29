@@ -31,8 +31,12 @@ autoagents = { version = "0.3.7", features = ["ollama", "logging"] }
 autoagents-derive = "0.3.7"
 autoagents-toolkit = { version = "0.3.7", features = ["filesystem"] }
 axum = { version = "0.7", features = ["ws"] }
-rust-embed = { version = "8", features = ["debug-embed"] }
+# No `debug-embed`: in debug builds assets are read from `frontend/dist` on disk,
+# so a fresh `trunk build` (e.g. after the developer agent implements a change) is
+# served live. Release builds still embed the assets into the binary.
+rust-embed = "8"
 tokio-stream = "0.1.18"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # https://ratatui.rs/recipes/apps/release-your-app/#optimizations
 [profile.release]

@@ -14,6 +14,26 @@ pub struct AgentInfo {
     pub model: String,
     pub policy: String,
     pub status: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub perpetual: bool,
+}
+
+/// Mirrors `crate::swarm::store::Task`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Task {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub tags: String,
+    pub status: String,
+    #[serde(default)]
+    pub updated: String,
 }
 
 /// Mirrors `crate::swarm::SwarmEvent`: an agent id + the externally-tagged
@@ -69,6 +89,38 @@ pub async fn cancel_agent(id: String) {
 
 pub async fn cancel_all() {
     let _ = Request::post("/api/agents/cancel-all").send().await;
+}
+
+pub async fn fetch_tasks() -> Vec<Task> {
+    match Request::get("/api/tasks").send().await {
+        Ok(resp) => resp.json().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+pub async fn fetch_history() -> Vec<Task> {
+    match Request::get("/api/tasks/history").send().await {
+        Ok(resp) => resp.json().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+pub async fn update_task(id: &str, title: &str, body: &str) -> Result<(), String> {
+    Request::put(&format!("/api/tasks/{id}"))
+        .json(&serde_json::json!({ "title": title, "body": body }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn accept_task(id: &str) {
+    let _ = Request::post(&format!("/api/tasks/{id}/accept")).send().await;
+}
+
+pub async fn reject_task(id: &str) {
+    let _ = Request::post(&format!("/api/tasks/{id}/reject")).send().await;
 }
 
 /// Build the absolute `ws(s)://host/ws` URL from the current page location.

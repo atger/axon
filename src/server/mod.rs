@@ -17,6 +17,8 @@ use axum::{
     response::{Html, IntoResponse, Response},
     routing::{get, post},
 };
+
+mod tasks;
 use color_eyre::eyre::{Result, WrapErr};
 use serde::Deserialize;
 use serde_json::json;
@@ -35,6 +37,11 @@ pub async fn run_server(swarm: Arc<Swarm>, host: String, port: u16) -> Result<()
         .route("/api/agents/cancel-all", post(cancel_all))
         .route("/api/agents/:id", get(get_agent).delete(cancel_agent))
         .route("/api/models", get(list_models))
+        .route("/api/tasks", get(tasks::list))
+        .route("/api/tasks/history", get(tasks::history))
+        .route("/api/tasks/:id", get(tasks::get).put(tasks::update))
+        .route("/api/tasks/:id/accept", post(tasks::accept))
+        .route("/api/tasks/:id/reject", post(tasks::reject))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
         .with_state(swarm);

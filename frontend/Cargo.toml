@@ -14,6 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 futures = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Location"] }
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 
 # Standalone workspace so the root `cargo build` (axon) never tries to build this
 # wasm crate; it is built independently by Trunk into `frontend/dist`.

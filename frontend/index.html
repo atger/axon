@@ -34,6 +34,20 @@
   .badge.queued{color:var(--muted)} .badge.running{color:var(--accent);border-color:var(--accent)}
   .badge.done{color:var(--green);border-color:var(--green)} .badge.error{color:var(--red);border-color:var(--red)}
   .badge.cancelled{color:var(--yellow);border-color:var(--yellow)}
+  .badge.idle{color:#bc8cff;border-color:#bc8cff}
+  .badge.proposed{color:var(--muted)} .badge.accepted{color:var(--accent);border-color:var(--accent)}
+  .badge.implementing{color:var(--yellow);border-color:var(--yellow)}
+  .badge.implemented{color:var(--green);border-color:var(--green)}
+  .badge.failed{color:var(--red);border-color:var(--red)} .badge.rejected{color:var(--muted)}
+  .badge.sys{color:#bc8cff;border-color:#bc8cff}
+  nav { display:flex; gap:6px; }
+  nav button.active { border-color:var(--accent); color:var(--accent); }
+  .md-edit { width:100%; height:calc(100vh - 170px); resize:none; }
+  .title-edit { width:100%; }
+  .md-preview { overflow-y:auto; height:calc(100vh - 110px); border:1px solid var(--border); border-radius:6px; padding:14px; background:var(--panel); }
+  .md-preview h1,.md-preview h2,.md-preview h3 { color:var(--accent); }
+  .md-preview pre { background:#0b0f14; padding:8px; border-radius:6px; overflow-x:auto; }
+  .row { display:flex; align-items:center; gap:8px; }
   .muted { color:var(--muted); }
   .log { white-space:pre-wrap; word-break:break-word; }
   .log .line { padding:2px 0; border-bottom:1px solid #1d2530; }
