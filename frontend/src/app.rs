@@ -57,6 +57,34 @@ impl State {
         v.extend(self.history.get());
         v
     }
+
+    /// The active task to select after `removed` leaves the active list:
+    /// the next one in the list, else the previous, else None.
+    fn next_active_after(self, removed: &str) -> Option<Task> {
+        let tasks = self.tasks.get();
+        let idx = tasks.iter().position(|t| t.id == removed)?;
+        tasks
+            .get(idx + 1)
+            .or_else(|| idx.checked_sub(1).and_then(|i| tasks.get(i)))
+            .cloned()
+    }
+
+    /// Point the selection + editor at `t`, or clear both when `None`.
+    fn select_task(self, t: Option<Task>) {
+        match t {
+            Some(t) => {
+                self.task_selected.set(Some(t.id));
+                self.edit_title.set(t.title);
+                self.edit_body.set(t.body);
+                self.raw_mode.set(false);
+            }
+            None => {
+                self.task_selected.set(None);
+                self.edit_title.set(String::new());
+                self.edit_body.set(String::new());
+            }
+        }
+    }
 }
 
 #[component]
@@ -305,7 +333,12 @@ fn TaskDetail(state: State) -> impl IntoView {
                         }>"Accept"</button>
                         <button class="danger" on:click=move |_| {
                             let id = id_reject.clone();
-                            spawn_local(async move { api::reject_task(&id).await; state.refresh_tasks(); });
+                            let next = state.next_active_after(&id);
+                            spawn_local(async move {
+                                api::reject_task(&id).await;
+                                state.refresh_tasks();
+                                state.select_task(next);
+                            });
                         }>"Reject"</button>
                     })}
                 </div>
