@@ -19,7 +19,6 @@ pub struct LogLine {
 enum ViewTab {
     Agents,
     Tasks,
-    Teams,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -44,6 +43,7 @@ struct State {
     edit_body: RwSignal<String>,
     teams: RwSignal<Vec<TeamWithAgents>>,
     models: RwSignal<Vec<String>>,
+    editing_def: RwSignal<bool>,
 }
 
 impl State {
@@ -113,13 +113,20 @@ pub fn App() -> impl IntoView {
         edit_body: RwSignal::new(String::new()),
         teams: RwSignal::new(Vec::new()),
         models: RwSignal::new(Vec::new()),
+        editing_def: RwSignal::new(false),
     };
 
     spawn_local(async move {
         state.model.set(api::fetch_model().await);
         state.tasks.set(api::fetch_tasks().await);
         state.history.set(api::fetch_history().await);
-        state.teams.set(api::fetch_teams().await);
+        let teams = api::fetch_teams().await;
+        if !teams.iter().any(|t| t.team.name == "custom") {
+            let _ = api::create_team("custom").await;
+            state.teams.set(api::fetch_teams().await);
+        } else {
+            state.teams.set(teams);
+        }
         state.models.set(api::fetch_models().await);
         loop {
             state.agents.set(api::fetch_agents().await);
@@ -138,9 +145,6 @@ pub fn App() -> impl IntoView {
                     "TO DO"</button>
                 <button class:active=move || state.tab.get() == ViewTab::Agents
                     on:click=move |_| state.tab.set(ViewTab::Agents)>"Agents"</button>
-                <button class:active=move || state.tab.get() == ViewTab::Teams
-                    on:click=move |_| { state.tab.set(ViewTab::Teams); state.refresh_teams(); }>
-                    "Teams"</button>
             </nav>
             <span class="model">"model: " {move || state.model.get()}</span>
             <span class="spacer"></span>
@@ -149,7 +153,6 @@ pub fn App() -> impl IntoView {
         {move || match state.tab.get() {
             ViewTab::Agents => agents_view(state).into_any(),
             ViewTab::Tasks => tasks_view(state).into_any(),
-            ViewTab::Teams => view! { <TeamsView state=state/> }.into_any(),
         }}
     }
 }
@@ -159,10 +162,118 @@ pub fn App() -> impl IntoView {
 // --------------------------------------------------------------------------
 
 fn agents_view(state: State) -> impl IntoView {
+    let ed_md = RwSignal::new(String::new());
+    let ed_def = RwSignal::new(Option::<AgentDef>::None);
+    let raw_mode = RwSignal::new(false);
+    let show_spawn = RwSignal::new(false);
+    let spawn_task = RwSignal::new(String::new());
+
+    // All agent defs flattened from all teams, sorted by name.
+    let all_defs = move || {
+        let mut defs: Vec<AgentDef> = state.teams.get().into_iter()
+            .flat_map(|t| t.agents).collect();
+        defs.sort_by(|a, b| a.name.cmp(&b.name));
+        defs
+    };
+
+    let open_def = move |d: AgentDef| {
+        ed_md.set(agent_def_to_md(&d));
+        ed_def.set(Some(d));
+        raw_mode.set(false);
+        show_spawn.set(false);
+        spawn_task.set(String::new());
+        state.editing_def.set(true);
+        state.selected.set(None);
+    };
+
+    let save = move |_| {
+        let def = ed_def.get().unwrap_or_else(|| blank_def("custom".to_string()));
+        let updated = md_to_agent_def(&ed_md.get(), &def);
+        let id = if updated.id.is_empty() { None } else { Some(updated.id.clone()) };
+        let team = updated.team_id.clone();
+        raw_mode.set(false);
+        spawn_local(async move {
+            let _ = match id {
+                Some(id) => api::update_def(&id, &updated).await,
+                None => api::create_def(&team, &updated).await,
+            };
+            state.teams.set(api::fetch_teams().await);
+            state.editing_def.set(false);
+        });
+    };
+
+    let del = move |_| {
+        let id = ed_def.get().and_then(|d| if d.id.is_empty() { None } else { Some(d.id.clone()) });
+        if let Some(id) = id {
+            state.editing_def.set(false);
+            spawn_local(async move {
+                let _ = api::delete_def(&id).await;
+                state.teams.set(api::fetch_teams().await);
+            });
+        }
+    };
+
+    let do_spawn = move |_| {
+        let task = spawn_task.get().trim().to_string();
+        if task.is_empty() { return; }
+        if let Some(def) = ed_def.get() {
+            if !def.id.is_empty() {
+                let id = def.id.clone();
+                spawn_task.set(String::new());
+                show_spawn.set(false);
+                spawn_local(async move {
+                    let _ = api::spawn_agent(id, task).await;
+                    state.agents.set(api::fetch_agents().await);
+                });
+            }
+        }
+    };
+
     view! {
         <main>
             <div class="left">
-                <SpawnForm state=state/>
+                <div class="row" style="margin-bottom:8px">
+                    <h3 class="section" style="margin:0">"DEFINITIONS"</h3>
+                    <span class="spacer"></span>
+                    <button on:click=move |_| {
+                        let d = blank_def("custom".to_string());
+                        ed_md.set(agent_def_to_md(&d));
+                        ed_def.set(Some(d));
+                        raw_mode.set(false);
+                        show_spawn.set(false);
+                        spawn_task.set(String::new());
+                        state.editing_def.set(true);
+                        state.selected.set(None);
+                    }>"+ New"</button>
+                </div>
+                <div class="agents">
+                    {move || {
+                        let defs = all_defs();
+                        if defs.is_empty() {
+                            view! { <div class="empty">"no definitions yet"</div> }.into_any()
+                        } else {
+                            defs.into_iter().map(|a| {
+                                let aid = a.id.clone();
+                                let is_sel = move || state.editing_def.get()
+                                    && ed_def.get().as_ref().map(|d| d.id == aid).unwrap_or(false);
+                                let ac = a.clone();
+                                let a_clone = a.clone();
+                                view! {
+                                    <div class=move || if is_sel() { "agent sel" } else { "agent" }
+                                        on:click=move |_| open_def(a_clone.clone())>
+                                        <div class="row">
+                                            <span class="id">{ac.name.clone()}</span>
+                                            {ac.schedule_mins.map(|m| view! { <span class="badge sys">{format!("⏲ {m}m")}</span> })}
+                                            <span class="spacer"></span>
+                                            <span class="badge">{ac.model.clone().unwrap_or_else(|| "default".to_string())}</span>
+                                        </div>
+                                        <div class="task">{ac.instructions.clone()}</div>
+                                    </div>
+                                }
+                            }).collect_view().into_any()
+                        }
+                    }}
+                </div>
                 <div class="row" style="margin:14px 0 8px">
                     <h3 class="section" style="margin:0">"AGENTS"</h3>
                     <span class="spacer"></span>
@@ -173,110 +284,77 @@ fn agents_view(state: State) -> impl IntoView {
                     {move || {
                         let ags = state.agents.get();
                         if ags.is_empty() {
-                            view! { <div class="empty">"none yet"</div> }.into_any()
+                            view! { <div class="empty">"none running"</div> }.into_any()
                         } else {
                             ags.into_iter().map(|a| agent_card(state, a)).collect_view().into_any()
                         }
                     }}
                 </div>
             </div>
-            <div class="right"><Detail state=state/></div>
+            <div class="right">
+                {move || {
+                    if state.editing_def.get() {
+                        let ro = move || ed_def.get().map(|d| d.builtin).unwrap_or(false);
+                        view! {
+                            <div class="row" style="margin-bottom:8px">
+                                <h3 style="margin:0">
+                                    {move || {
+                                        let d = ed_def.get();
+                                        if d.as_ref().map(|d| !d.id.is_empty()).unwrap_or(false) {
+                                            d.as_ref().map(|d| d.name.as_str()).unwrap_or("agent").to_string()
+                                        } else { "New agent".to_string() }
+                                    }}
+                                </h3>
+                                <span class="spacer"></span>
+                                {move || ro().then(|| view! { <span class="badge sys">"read-only"</span> })}
+                                <button on:click=move |_| raw_mode.update(|r| *r = !*r)>
+                                    {move || if raw_mode.get() { "view" } else { "edit" }}</button>
+                            </div>
+                            {move || if raw_mode.get() {
+                                view! {
+                                    <textarea class="md-edit" prop:value=move || ed_md.get()
+                                        on:input=move |e| ed_md.set(event_target_value(&e))></textarea>
+                                    {move || (!ro()).then(|| view! {
+                                        <div class="row" style="margin-top:8px">
+                                            <button on:click=save>"Save"</button>
+                                            <button on:click=move |_| { raw_mode.set(false); state.editing_def.set(false); }>"Cancel"</button>
+                                        </div>
+                                    })}
+                                }.into_any()
+                            } else {
+                                view! {
+                                    <div class="md-preview" inner_html=move || render_agent_md(&ed_md.get())></div>
+                                    {move || (!ro()).then(|| view! {
+                                        <div class="spawn-section">
+                                            <div class="row">
+                                                <button on:click=move |_| raw_mode.set(true)>"Edit"</button>
+                                                <button on:click=move |_| show_spawn.update(|s| *s = !*s)>
+                                                    {move || if show_spawn.get() { "Cancel spawn" } else { "Spawn with task…" }}</button>
+                                                {move || ed_def.get().map(|d| !d.id.is_empty()).unwrap_or(false).then(|| view! {
+                                                    <button class="danger" on:click=del>"Delete"</button>
+                                                })}
+                                            </div>
+                                            {move || show_spawn.get().then(|| view! {
+                                                <div class="field" style="margin-top:8px">
+                                                    <textarea prop:value=move || spawn_task.get()
+                                                        on:input=move |e| spawn_task.set(event_target_value(&e))
+                                                        placeholder="Describe a task for this agent…"></textarea>
+                                                    <button style="margin-top:4px" on:click=do_spawn>"Launch"</button>
+                                                </div>
+                                            })}
+                                        </div>
+                                    })}
+                                }.into_any()
+                            }}
+                        }.into_any()
+                    } else if state.selected.get().is_some() {
+                        view! { <Detail state=state/> }.into_any()
+                    } else {
+                        view! { <h3 class="muted">"select a definition or running agent"</h3> }.into_any()
+                    }
+                }}
+            </div>
         </main>
-    }
-}
-
-#[component]
-fn SpawnForm(state: State) -> impl IntoView {
-    let task = RwSignal::new(String::new());
-    let team_id = RwSignal::new(String::new());
-    let def_id = RwSignal::new(String::new());
-
-    // Once teams load, default the selection to the first team's first agent.
-    Effect::new(move |_| {
-        let teams = state.teams.get();
-        if team_id.get_untracked().is_empty()
-            && let Some(t) = teams.first()
-        {
-            team_id.set(t.team.id.clone());
-            if let Some(a) = t.agents.first() {
-                def_id.set(a.id.clone());
-            }
-        }
-    });
-
-    // Agent definitions belonging to the currently-selected team.
-    let current_agents = move || {
-        let tid = team_id.get();
-        state
-            .teams
-            .get()
-            .into_iter()
-            .find(|t| t.team.id == tid)
-            .map(|t| t.agents)
-            .unwrap_or_default()
-    };
-
-    let submit = move |_| {
-        let t = task.get().trim().to_string();
-        let d = def_id.get();
-        if t.is_empty() || d.is_empty() {
-            return;
-        }
-        task.set(String::new());
-        spawn_local(async move {
-            let _ = api::spawn_agent(d, t).await;
-            state.agents.set(api::fetch_agents().await);
-        });
-    };
-
-    view! {
-        <div class="field">
-            <label>"team"</label>
-            <select on:change=move |e| {
-                let tid = event_target_value(&e);
-                let first = state.teams.get().into_iter()
-                    .find(|t| t.team.id == tid)
-                    .and_then(|t| t.agents.first().map(|a| a.id.clone()))
-                    .unwrap_or_default();
-                team_id.set(tid);
-                def_id.set(first);
-            }>
-                {move || state.teams.get().into_iter().map(|t| {
-                    let id = t.team.id.clone();
-                    let sel = team_id.get() == id;
-                    view! { <option value=id.clone() selected=sel>{t.team.name}</option> }
-                }).collect_view()}
-            </select>
-        </div>
-        <div class="field">
-            <label>"agent"</label>
-            <select on:change=move |e| def_id.set(event_target_value(&e))>
-                {move || current_agents().into_iter().map(|a| {
-                    let id = a.id.clone();
-                    let sel = def_id.get() == id;
-                    view! { <option value=id.clone() selected=sel>{a.name}</option> }
-                }).collect_view()}
-            </select>
-        </div>
-        {move || {
-            let d = def_id.get();
-            current_agents().into_iter().find(|a| a.id == d).map(|a| {
-                let model = a.model.clone().unwrap_or_else(|| "default".to_string());
-                let tools = if a.tools.is_empty() { "read-only".to_string() } else { a.tools.join(", ") };
-                view! {
-                    <div class="muted" style="font-size:12px;margin:-4px 0 8px">
-                        {format!("model: {model} · {} · tools: {tools}", a.policy)}
-                    </div>
-                }
-            })
-        }}
-        <div class="field">
-            <label>"task"</label>
-            <textarea prop:value=move || task.get()
-                on:input=move |e| task.set(event_target_value(&e))
-                placeholder="Describe a task for this agent…"></textarea>
-        </div>
-        <button on:click=submit>"spawn agent"</button>
     }
 }
 
@@ -309,7 +387,7 @@ fn agent_card(state: State, a: AgentInfo) -> impl IntoView {
     let label = a.def_name.clone().unwrap_or_else(|| a.model.clone());
     view! {
         <div class=move || if selected() { "agent sel" } else { "agent" }
-            on:click={ let id = a.id.clone(); move |_| state.selected.set(Some(id.clone())) }>
+            on:click={ let id = a.id.clone(); move |_| { state.selected.set(Some(id.clone())); state.editing_def.set(false); } }>
             <div class="row">
                 <span class="id">{a.id.clone()}</span>
                 {move || system.then(|| view! { <span class="badge sys">{role.clone()}</span> })}
@@ -331,19 +409,6 @@ fn agent_card(state: State, a: AgentInfo) -> impl IntoView {
 // Teams view (configure reusable agents)
 // --------------------------------------------------------------------------
 
-/// Tools a user can toggle per agent. Read-only tools (read_file / list_dir /
-/// search_file) are always granted by the backend and so are not shown.
-/// `add_task` (enqueue work for human review) and `spawn_agent` (delegate to
-/// teammates) are mainly useful for proactive/scheduled agents.
-const TOGGLE_TOOLS: &[&str] = &[
-    "write_file",
-    "delete_file",
-    "run_command",
-    "web_search",
-    "add_task",
-    "spawn_agent",
-];
-
 fn blank_def(team_id: String) -> AgentDef {
     AgentDef {
         id: String::new(),
@@ -358,256 +423,6 @@ fn blank_def(team_id: String) -> AgentDef {
         schedule_mins: None,
         task: None,
         builtin: false,
-    }
-}
-
-#[component]
-fn TeamsView(state: State) -> impl IntoView {
-    let new_team = RwSignal::new(String::new());
-
-    // Editor state for the agent def being created/edited.
-    let editing = RwSignal::new(false);
-    let ed_id = RwSignal::new(Option::<String>::None);
-    let ed_team = RwSignal::new(String::new());
-    let ed_name = RwSignal::new(String::new());
-    let ed_model = RwSignal::new(String::new());
-    let ed_instr = RwSignal::new(String::new());
-    let ed_policy = RwSignal::new("auto_approve".to_string());
-    let ed_mem = RwSignal::new(String::new());
-    let ed_turns = RwSignal::new(String::new());
-    let ed_tools = RwSignal::new(Vec::<String>::new());
-    let ed_sched = RwSignal::new(String::new());
-    let ed_task = RwSignal::new(String::new());
-    let ed_builtin = RwSignal::new(false);
-
-    // Load a def (blank for "new") into the editor signals.
-    let open_def = move |d: AgentDef, team: String| {
-        ed_id.set(if d.id.is_empty() { None } else { Some(d.id) });
-        ed_team.set(team);
-        ed_name.set(d.name);
-        ed_model.set(d.model.unwrap_or_default());
-        ed_instr.set(d.instructions);
-        ed_policy.set(d.policy);
-        ed_mem.set(d.memory_window.map(|n| n.to_string()).unwrap_or_default());
-        ed_turns.set(d.max_turns.map(|n| n.to_string()).unwrap_or_default());
-        ed_tools.set(d.tools);
-        ed_sched.set(d.schedule_mins.map(|n| n.to_string()).unwrap_or_default());
-        ed_task.set(d.task.unwrap_or_default());
-        ed_builtin.set(d.builtin);
-        editing.set(true);
-    };
-
-    let save = move |_| {
-        let def = AgentDef {
-            id: ed_id.get().unwrap_or_default(),
-            team_id: ed_team.get(),
-            name: ed_name.get(),
-            model: {
-                let m = ed_model.get();
-                if m.is_empty() { None } else { Some(m) }
-            },
-            instructions: ed_instr.get(),
-            tools: ed_tools.get(),
-            policy: ed_policy.get(),
-            memory_window: ed_mem.get().trim().parse().ok(),
-            max_turns: ed_turns.get().trim().parse().ok(),
-            schedule_mins: ed_sched.get().trim().parse().ok(),
-            task: {
-                let t = ed_task.get();
-                if t.trim().is_empty() { None } else { Some(t) }
-            },
-            builtin: false,
-        };
-        let id = ed_id.get();
-        let team = ed_team.get();
-        editing.set(false);
-        spawn_local(async move {
-            let _ = match id {
-                Some(id) => api::update_def(&id, &def).await,
-                None => api::create_def(&team, &def).await,
-            };
-            state.teams.set(api::fetch_teams().await);
-        });
-    };
-
-    let del = move |_| {
-        editing.set(false);
-        if let Some(id) = ed_id.get() {
-            spawn_local(async move {
-                let _ = api::delete_def(&id).await;
-                state.teams.set(api::fetch_teams().await);
-            });
-        }
-    };
-
-    view! {
-        <main>
-            <div class="left">
-                <div class="row" style="margin-bottom:8px">
-                    <input prop:value=move || new_team.get()
-                        on:input=move |e| new_team.set(event_target_value(&e))
-                        placeholder="new team name" />
-                    <button on:click=move |_| {
-                        let n = new_team.get().trim().to_string();
-                        if n.is_empty() { return; }
-                        new_team.set(String::new());
-                        spawn_local(async move {
-                            let _ = api::create_team(&n).await;
-                            state.teams.set(api::fetch_teams().await);
-                        });
-                    }>"add team"</button>
-                </div>
-                <div class="agents">
-                    {move || state.teams.get().into_iter()
-                        .map(|t| team_block(state, t, open_def))
-                        .collect_view()}
-                </div>
-            </div>
-            <div class="right">
-                {move || if editing.get() {
-                    let ro = move || ed_builtin.get();
-                    view! {
-                        <div class="row" style="margin-bottom:8px">
-                            <h3 style="margin:0">
-                                {move || if ed_id.get().is_some() { "Edit agent" } else { "New agent" }}
-                            </h3>
-                            <span class="spacer"></span>
-                            {move || ed_builtin.get().then(|| view! { <span class="badge sys">"read-only"</span> })}
-                        </div>
-                        <div class="field">
-                            <label>"name"</label>
-                            <input prop:value=move || ed_name.get() prop:disabled=ro
-                                on:input=move |e| ed_name.set(event_target_value(&e)) />
-                        </div>
-                        <div class="field">
-                            <label>"model"</label>
-                            <select prop:disabled=ro on:change=move |e| ed_model.set(event_target_value(&e))>
-                                <option value="" selected=move || ed_model.get().is_empty()>"(default)"</option>
-                                {move || state.models.get().into_iter().map(|m| {
-                                    let sel = ed_model.get() == m;
-                                    view! { <option value=m.clone() selected=sel>{m.clone()}</option> }
-                                }).collect_view()}
-                            </select>
-                        </div>
-                        <div class="field">
-                            <label>"instructions (system prompt)"</label>
-                            <textarea prop:value=move || ed_instr.get() prop:disabled=ro
-                                on:input=move |e| ed_instr.set(event_target_value(&e))></textarea>
-                        </div>
-                        <div class="field">
-                            <label>"tools"</label>
-                            <div>
-                                {TOGGLE_TOOLS.iter().map(|name| {
-                                    let name = name.to_string();
-                                    let nc = name.clone();
-                                    let nt = name.clone();
-                                    view! {
-                                        <label style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-weight:normal">
-                                            <input type="checkbox" prop:disabled=ro
-                                                prop:checked=move || ed_tools.get().iter().any(|t| t == &nc)
-                                                on:change=move |e| {
-                                                    let on = event_target_checked(&e);
-                                                    ed_tools.update(|v| {
-                                                        v.retain(|t| t != &nt);
-                                                        if on { v.push(nt.clone()); }
-                                                    });
-                                                } />
-                                            {name.clone()}
-                                        </label>
-                                    }
-                                }).collect_view()}
-                            </div>
-                        </div>
-                        <div class="field">
-                            <label>"approval policy"</label>
-                            <select prop:disabled=ro on:change=move |e| ed_policy.set(event_target_value(&e))>
-                                <option value="auto_approve" selected=move || ed_policy.get() == "auto_approve">"auto-approve"</option>
-                                <option value="deny_destructive" selected=move || ed_policy.get() == "deny_destructive">"deny destructive"</option>
-                            </select>
-                        </div>
-                        <div class="row">
-                            <div class="field" style="flex:1">
-                                <label>"memory window"</label>
-                                <input type="number" prop:value=move || ed_mem.get() prop:disabled=ro
-                                    placeholder="20" on:input=move |e| ed_mem.set(event_target_value(&e)) />
-                            </div>
-                            <div class="field" style="flex:1">
-                                <label>"max turns"</label>
-                                <input type="number" prop:value=move || ed_turns.get() prop:disabled=ro
-                                    placeholder="10" on:input=move |e| ed_turns.set(event_target_value(&e)) />
-                            </div>
-                        </div>
-                        <div class="field">
-                            <label>"schedule — run every N minutes (blank = on-demand)"</label>
-                            <input type="number" prop:value=move || ed_sched.get() prop:disabled=ro
-                                placeholder="e.g. 30" on:input=move |e| ed_sched.set(event_target_value(&e)) />
-                        </div>
-                        <div class="field">
-                            <label>"recurring task (what a proactive agent does each cycle)"</label>
-                            <textarea prop:value=move || ed_task.get() prop:disabled=ro
-                                placeholder="e.g. Check competitor blogs and add tasks for noteworthy updates"
-                                on:input=move |e| ed_task.set(event_target_value(&e))></textarea>
-                        </div>
-                        {move || (!ed_builtin.get()).then(|| view! {
-                            <div class="row" style="margin-top:8px">
-                                <button on:click=save>"Save"</button>
-                                {move || ed_id.get().is_some().then(|| view! {
-                                    <button class="danger" on:click=del>"Delete"</button>
-                                })}
-                            </div>
-                        })}
-                    }.into_any()
-                } else {
-                    view! { <h3 class="muted">"select an agent to edit, or add one to a team"</h3> }.into_any()
-                }}
-            </div>
-        </main>
-    }
-}
-
-/// One team's header (with delete / add-agent for user teams) plus its agents.
-fn team_block(
-    state: State,
-    t: TeamWithAgents,
-    open_def: impl Fn(AgentDef, String) + Copy + 'static,
-) -> impl IntoView {
-    let builtin = t.team.builtin;
-    let tid_del = t.team.id.clone();
-    let tid_add = t.team.id.clone();
-    view! {
-        <div class="row" style="margin:12px 0 4px">
-            <h3 class="section" style="margin:0">{t.team.name.clone()}</h3>
-            {builtin.then(|| view! { <span class="badge sys">"built-in"</span> })}
-            <span class="spacer"></span>
-            {(!builtin).then(move || view! {
-                <button on:click=move |_| {
-                    let tid = tid_add.clone();
-                    open_def(blank_def(tid.clone()), tid);
-                }>"+ agent"</button>
-                <button class="danger" on:click=move |_| {
-                    let tid = tid_del.clone();
-                    spawn_local(async move {
-                        let _ = api::delete_team(&tid).await;
-                        state.teams.set(api::fetch_teams().await);
-                    });
-                }>"delete"</button>
-            })}
-        </div>
-        {t.agents.into_iter().map(move |a| {
-            let team = t.team.id.clone();
-            let ac = a.clone();
-            view! {
-                <div class="agent" on:click=move |_| open_def(ac.clone(), team.clone())>
-                    <div class="row">
-                        <span class="id">{a.name.clone()}</span>
-                        {a.schedule_mins.map(|m| view! { <span class="badge sys">{format!("⏲ {m}m")}</span> })}
-                        <span class="spacer"></span>
-                        <span class="badge">{a.model.clone().unwrap_or_else(|| "default".to_string())}</span>
-                    </div>
-                    <div class="task">{a.instructions.clone()}</div>
-                </div>
-            }
-        }).collect_view()}
     }
 }
 
@@ -739,6 +554,284 @@ fn md_to_html(src: &str) -> String {
     let mut out = String::new();
     pulldown_cmark::html::push_html(&mut out, parser);
     out
+}
+
+/// Render an agent definition markdown (with YAML frontmatter) to HTML.
+/// Strips frontmatter, renders metadata as a compact section, then the body.
+fn render_agent_md(md: &str) -> String {
+    let trimmed = md.trim();
+    if !trimmed.starts_with("---") {
+        return md_to_html(trimmed);
+    }
+    let after_first = &trimmed[3..];
+    let end = after_first.find("\n---").unwrap_or(after_first.len());
+    let frontmatter = &after_first[..end];
+    let body = if end < after_first.len() {
+        after_first[end + 4..].trim()
+    } else {
+        ""
+    };
+
+    let mut meta = String::new();
+    let mut tools = Vec::new();
+    let mut schedule = String::new();
+    let mut task = String::new();
+    let mut in_tools = false;
+
+    for line in frontmatter.lines() {
+        let tl = line.trim();
+
+        if in_tools {
+            if tl.starts_with('#') {
+                continue;
+            }
+            if let Some(item) = tl.strip_prefix("- ") {
+                tools.push(item.trim().to_string());
+                continue;
+            }
+            in_tools = false;
+        }
+
+        if tl.is_empty() || tl.starts_with('#') {
+            continue;
+        }
+
+        if let Some((key, val)) = tl.split_once(':') {
+            let k = key.trim();
+            let v = val.split('#').next().unwrap_or("").trim();
+            match k {
+                "name" if !v.is_empty() => {
+                    meta.push_str(&format!("<span class=\"meta-name\">{}</span> ", v));
+                }
+                "model" if !v.is_empty() => {
+                    meta.push_str(&format!("<span class=\"meta-badge\">{}</span> ", v));
+                }
+                "policy" if !v.is_empty() => {
+                    meta.push_str(&format!("<span class=\"meta-badge\">{}</span> ", v));
+                }
+                "tools" if v.is_empty() => {
+                    in_tools = true;
+                }
+                "tools" => {
+                    if v.starts_with('[') && v.ends_with(']') {
+                        let inner = &v[1..v.len() - 1];
+                        tools = inner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    }
+                }
+                "memory_window" if !v.is_empty() => {
+                    meta.push_str(&format!("<span class=\"meta-badge\">mem: {}</span> ", v));
+                }
+                "max_turns" if !v.is_empty() => {
+                    meta.push_str(&format!("<span class=\"meta-badge\">turns: {}</span> ", v));
+                }
+                "schedule_mins" if !v.is_empty() => {
+                    if let Ok(n) = v.parse::<u64>() {
+                        schedule = format!("{n}m");
+                    }
+                }
+                "task" if !v.is_empty() && v != "|" => {
+                    task = v.to_string();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !tools.is_empty() {
+        meta.push_str(&format!("<span class=\"meta-badge\">tools: {}</span> ", tools.join(", ")));
+    }
+    if !schedule.is_empty() {
+        meta.push_str(&format!("<span class=\"meta-badge\">⏲ {}</span> ", schedule));
+    }
+    if !task.is_empty() {
+        meta.push_str(&format!("<span class=\"meta-badge\">task: {}</span> ", task));
+    }
+
+    let mut html = String::from("<div class=\"agent-meta\">");
+    html.push_str(&meta);
+    html.push_str("</div>\n");
+    html.push_str(&md_to_html(body));
+    html
+}
+
+fn agent_def_to_md(def: &AgentDef) -> String {
+    // Blank def → full template with all options shown.
+    if def.name.is_empty() && def.id.is_empty() {
+        return "\
+---
+name: 
+model:  # leave empty for default
+tools:
+  - write_file
+  # - delete_file
+  # - run_command
+  # - web_search
+  # - add_task
+  # - spawn_agent
+policy: auto_approve  # auto_approve or deny_destructive
+memory_window: 20  # conversation window
+max_turns: 10  # max turns before stopping
+schedule_mins:  # set to run on N-minute interval (blank = on-demand)
+task:  # recurring task description (if scheduled)
+---
+
+# Agent instructions
+
+Describe what this agent should do...
+".to_string();
+    }
+
+    let mut fm = String::new();
+    fm.push_str("---\n");
+    fm.push_str(&format!("name: {}\n", def.name));
+    if let Some(ref m) = def.model {
+        fm.push_str(&format!("model: {m}\n"));
+    }
+    if !def.tools.is_empty() {
+        fm.push_str("tools:\n");
+        for t in &def.tools {
+            fm.push_str(&format!("  - {t}\n"));
+        }
+    }
+    fm.push_str(&format!("policy: {}\n", def.policy));
+    if let Some(n) = def.memory_window {
+        fm.push_str(&format!("memory_window: {n}\n"));
+    }
+    if let Some(n) = def.max_turns {
+        fm.push_str(&format!("max_turns: {n}\n"));
+    }
+    if let Some(n) = def.schedule_mins {
+        fm.push_str(&format!("schedule_mins: {n}\n"));
+    }
+    if let Some(ref t) = def.task {
+        fm.push_str("task: |\n");
+        for line in t.lines() {
+            fm.push_str(&format!("  {line}\n"));
+        }
+    }
+    fm.push_str("---\n\n");
+    fm.push_str(&def.instructions);
+    fm
+}
+
+fn md_to_agent_def(md: &str, fallback: &AgentDef) -> AgentDef {
+    let mut def = AgentDef {
+        id: fallback.id.clone(),
+        team_id: fallback.team_id.clone(),
+        name: fallback.name.clone(),
+        model: None,
+        instructions: String::new(),
+        tools: Vec::new(),
+        policy: "auto_approve".to_string(),
+        memory_window: None,
+        max_turns: None,
+        schedule_mins: None,
+        task: None,
+        builtin: fallback.builtin,
+    };
+
+    // Find the frontmatter between --- delimiters.
+    let trimmed = md.trim();
+    if !trimmed.starts_with("---") {
+        def.instructions = trimmed.to_string();
+        return def;
+    }
+    let after_first = &trimmed[3..];
+    let end = after_first.find("\n---").unwrap_or(after_first.len());
+    let frontmatter = &after_first[..end];
+    let body = if end < after_first.len() {
+        after_first[end + 4..].trim()
+    } else {
+        ""
+    };
+
+    // Parse YAML-like frontmatter.
+    let mut tools: Vec<String> = Vec::new();
+    let mut in_tools = false;
+    let mut task_body = String::new();
+    let mut in_task = false;
+
+    for line in frontmatter.lines() {
+        let trimmed_line = line.trim();
+
+        if in_task {
+            if line.starts_with("  ") || trimmed_line.is_empty() {
+                if !task_body.is_empty() {
+                    task_body.push('\n');
+                }
+                task_body.push_str(trimmed_line.trim());
+                continue;
+            } else {
+                def.task = Some(task_body.trim().to_string());
+                task_body.clear();
+                in_task = false;
+            }
+        }
+
+        if in_tools {
+            if trimmed_line.starts_with('#') {
+                continue;
+            }
+            if let Some(item) = trimmed_line.strip_prefix("- ") {
+                tools.push(item.trim().to_string());
+                continue;
+            } else {
+                def.tools = tools.clone();
+                tools.clear();
+                in_tools = false;
+            }
+        }
+
+        if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
+            continue;
+        }
+
+        if let Some((key, val)) = trimmed_line.split_once(':') {
+            let k = key.trim();
+            let v = val.split('#').next().unwrap_or("").trim();
+            match k {
+                "name" => def.name = v.to_string(),
+                "model" => {
+                    if !v.is_empty() {
+                        def.model = Some(v.to_string());
+                    }
+                }
+                "tools" => {
+                    if v.is_empty() || v == "[]" {
+                        // Block list follows
+                        in_tools = true;
+                    } else if v.starts_with('[') && v.ends_with(']') {
+                        // Inline list [a, b, c]
+                        let inner = &v[1..v.len() - 1];
+                        def.tools = inner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    }
+                }
+                "policy" => def.policy = v.to_string(),
+                "memory_window" => def.memory_window = v.parse().ok(),
+                "max_turns" => def.max_turns = v.parse().ok(),
+                "schedule_mins" => def.schedule_mins = v.parse().ok(),
+                "task" => {
+                    if v == "|" {
+                        in_task = true;
+                    } else if !v.is_empty() {
+                        def.task = Some(v.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Flush remaining multi-line values.
+    if !tools.is_empty() {
+        def.tools = tools;
+    }
+    if in_task && !task_body.is_empty() {
+        def.task = Some(task_body.trim().to_string());
+    }
+
+    def.instructions = body.to_string();
+    def
 }
 
 // --------------------------------------------------------------------------

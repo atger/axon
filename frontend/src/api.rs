@@ -14,12 +14,17 @@ pub struct AgentInfo {
     pub model: String,
     pub policy: String,
     pub status: String,
-    #[serde(default)]
+     #[serde(default)]
     pub role: String,
-    #[serde(default)]
+     #[serde(default)]
     pub perpetual: bool,
-    #[serde(default)]
+     #[serde(default)]
     pub def_name: Option<String>,
+     // Lifecycle tracking fields
+     #[serde(default)]
+    pub last_seen_stage: String,
+     #[serde(default)]
+    pub current_stage: String,
 }
 
 /// Mirrors `crate::swarm::teams::Team`.
@@ -27,47 +32,47 @@ pub struct AgentInfo {
 pub struct Team {
     pub id: String,
     pub name: String,
-    #[serde(default)]
+      #[serde(default)]
     pub builtin: bool,
 }
 
 /// Mirrors `crate::swarm::teams::AgentDef` (a saved agent configuration).
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 pub struct AgentDef {
-    #[serde(default)]
+     #[serde(default)]
     pub id: String,
-    #[serde(default)]
+     #[serde(default)]
     pub team_id: String,
     pub name: String,
-    #[serde(default)]
+      #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
+      #[serde(default)]
     pub instructions: String,
-    #[serde(default)]
+      #[serde(default)]
     pub tools: Vec<String>,
-    #[serde(default = "default_policy")]
+      #[serde(default = "default_policy")]
     pub policy: String,
-    #[serde(default)]
+      #[serde(default)]
     pub memory_window: Option<usize>,
-    #[serde(default)]
+      #[serde(default)]
     pub max_turns: Option<usize>,
-    #[serde(default)]
+      #[serde(default)]
     pub schedule_mins: Option<u64>,
-    #[serde(default)]
+      #[serde(default)]
     pub task: Option<String>,
-    #[serde(default)]
+      #[serde(default)]
     pub builtin: bool,
 }
 
 fn default_policy() -> String {
-    "auto_approve".to_string()
+      "auto_approve".to_string()
 }
 
 /// Mirrors `crate::swarm::teams::TeamWithAgents`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct TeamWithAgents {
     pub team: Team,
-    #[serde(default)]
+     #[serde(default)]
     pub agents: Vec<AgentDef>,
 }
 
@@ -76,14 +81,14 @@ pub struct TeamWithAgents {
 pub struct Task {
     pub id: String,
     pub title: String,
-    #[serde(default)]
+     #[serde(default)]
     pub description: String,
-    #[serde(default)]
+     #[serde(default)]
     pub body: String,
-    #[serde(default)]
+     #[serde(default)]
     pub tags: String,
     pub status: String,
-    #[serde(default)]
+     #[serde(default)]
     pub updated: String,
 }
 
@@ -98,7 +103,7 @@ pub struct SwarmEvent {
 #[derive(Deserialize)]
 struct ModelsResp {
     current: String,
-    #[serde(default)]
+     #[serde(default)]
     models: Vec<String>,
 }
 
@@ -112,39 +117,39 @@ pub async fn fetch_agents() -> Vec<AgentInfo> {
     match Request::get("/api/agents").send().await {
         Ok(resp) => resp.json().await.unwrap_or_default(),
         Err(_) => Vec::new(),
-    }
+     }
 }
 
 pub async fn fetch_model() -> String {
     match Request::get("/api/models").send().await {
         Ok(resp) => resp
-            .json::<ModelsResp>()
-            .await
-            .map(|m| m.current)
-            .unwrap_or_default(),
+             .json::<ModelsResp>()
+             .await
+             .map(|m| m.current)
+             .unwrap_or_default(),
         Err(_) => String::new(),
-    }
+     }
 }
 
 /// The list of selectable models (installed in Ollama; current model first).
 pub async fn fetch_models() -> Vec<String> {
     match Request::get("/api/models").send().await {
         Ok(resp) => resp
-            .json::<ModelsResp>()
-            .await
-            .map(|m| m.models)
-            .unwrap_or_default(),
+             .json::<ModelsResp>()
+             .await
+             .map(|m| m.models)
+             .unwrap_or_default(),
         Err(_) => Vec::new(),
-    }
+     }
 }
 
 pub async fn spawn_agent(def_id: String, task: String) -> Result<(), String> {
     Request::post("/api/agents")
-        .json(&SpawnReq { def_id, task })
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+         .json(&SpawnReq { def_id, task })
+         .map_err(|e| e.to_string())?
+         .send()
+         .await
+         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -154,52 +159,52 @@ pub async fn fetch_teams() -> Vec<TeamWithAgents> {
     match Request::get("/api/teams").send().await {
         Ok(resp) => resp.json().await.unwrap_or_default(),
         Err(_) => Vec::new(),
-    }
+     }
 }
 
 pub async fn create_team(name: &str) -> Result<(), String> {
     Request::post("/api/teams")
-        .json(&serde_json::json!({ "name": name }))
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+         .json(&serde_json::json!({ "name": name }))
+         .map_err(|e| e.to_string())?
+         .send()
+         .await
+         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub async fn delete_team(id: &str) -> Result<(), String> {
     Request::delete(&format!("/api/teams/{id}"))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+         .send()
+         .await
+         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub async fn create_def(team_id: &str, def: &AgentDef) -> Result<(), String> {
     Request::post(&format!("/api/teams/{team_id}/agents"))
-        .json(def)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+         .json(def)
+         .map_err(|e| e.to_string())?
+         .send()
+         .await
+         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub async fn update_def(id: &str, def: &AgentDef) -> Result<(), String> {
     Request::put(&format!("/api/agent-defs/{id}"))
-        .json(def)
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+         .json(def)
+         .map_err(|e| e.to_string())?
+         .send()
+         .await
+         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub async fn delete_def(id: &str) -> Result<(), String> {
     Request::delete(&format!("/api/agent-defs/{id}"))
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+         .send()
+         .await
+         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -215,23 +220,23 @@ pub async fn fetch_tasks() -> Vec<Task> {
     match Request::get("/api/tasks").send().await {
         Ok(resp) => resp.json().await.unwrap_or_default(),
         Err(_) => Vec::new(),
-    }
+     }
 }
 
 pub async fn fetch_history() -> Vec<Task> {
     match Request::get("/api/tasks/history").send().await {
         Ok(resp) => resp.json().await.unwrap_or_default(),
         Err(_) => Vec::new(),
-    }
+     }
 }
 
 pub async fn update_task(id: &str, title: &str, body: &str) -> Result<(), String> {
     Request::put(&format!("/api/tasks/{id}"))
-        .json(&serde_json::json!({ "title": title, "body": body }))
-        .map_err(|e| e.to_string())?
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+         .json(&serde_json::json!({ "title": title, "body": body }))
+         .map_err(|e| e.to_string())?
+         .send()
+         .await
+         .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -247,10 +252,10 @@ pub async fn reject_task(id: &str) {
 fn ws_url() -> String {
     let loc = web_sys::window().expect("window").location();
     let proto = if loc.protocol().as_deref() == Ok("https:") {
-        "wss"
-    } else {
-        "ws"
-    };
+         "wss"
+     } else {
+         "ws"
+     };
     let host = loc.host().unwrap_or_default();
     format!("{proto}://{host}/ws")
 }
@@ -265,14 +270,14 @@ where
             if let Ok(mut ws) = WebSocket::open(&ws_url()) {
                 while let Some(msg) = ws.next().await {
                     if let Ok(Message::Text(txt)) = msg
-                        && let Ok(ev) = serde_json::from_str::<SwarmEvent>(&txt)
-                    {
+                         && let Ok(ev) = serde_json::from_str::<SwarmEvent>(&txt)
+                     {
                         on_event(ev);
-                    }
-                }
+                     }
+                 }
             }
-            // Reconnect after a short delay.
+             // Reconnect after a short delay.
             gloo_timers::future::TimeoutFuture::new(1500).await;
-        }
+         }
     });
 }
