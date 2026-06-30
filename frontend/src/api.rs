@@ -248,9 +248,13 @@ pub async fn fetch_history() -> Vec<Task> {
      }
 }
 
-pub async fn update_task(id: &str, title: &str, body: &str) -> Result<(), String> {
+pub async fn update_task(id: &str, title: &str, body: &str, status: Option<&str>) -> Result<(), String> {
+    let mut payload = serde_json::json!({ "title": title, "body": body });
+    if let Some(s) = status {
+        payload["status"] = serde_json::json!(s);
+    }
     Request::put(&format!("/api/tasks/{id}"))
-         .json(&serde_json::json!({ "title": title, "body": body }))
+         .json(&payload)
          .map_err(|e| e.to_string())?
          .send()
          .await

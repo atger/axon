@@ -6,7 +6,7 @@ pub mod store;
 pub mod teams;
 pub mod tools;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -60,11 +60,26 @@ pub struct AgentInfo {
     /// Name of the agent definition this was spawned from (e.g. "Coder"); `None`
     /// for the built-in pipeline agents.
     pub def_name: Option<String>,
+    /// ISO-8601 timestamp when the agent was started.
+    #[serde(default)]
+    pub started: String,
 }
 
 struct AgentEntry {
     info: AgentInfo,
     control: Arc<AgentControl>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct HistoricAgent {
+    pub id: String,
+    pub task: String,
+    pub model: String,
+    pub status: AgentStatus,
+    pub def_name: Option<String>,
+    pub started: String,
+    pub completed: String,
+    pub result: Option<String>,
 }
 
 /// An event forwarded to dashboard WebSocket clients.
@@ -141,6 +156,7 @@ pub struct Swarm {
     scheduled: Mutex<HashMap<String, ScheduleEntry>>,
     /// Maps a scheduled def id → (running agent id, config signature).
     sched_index: Mutex<HashMap<String, (String, String)>>,
+    agent_history: Mutex<VecDeque<HistoricAgent>>,
     _env: Mutex<Environment>,
 }
 
@@ -178,6 +194,7 @@ impl Swarm {
             spawn_tx,
             scheduled: Mutex::new(HashMap::new()),
             sched_index: Mutex::new(HashMap::new()),
+            agent_history: Mutex::new(VecDeque::new()),
             _env: Mutex::new(env),
         });
 
@@ -243,6 +260,7 @@ impl Swarm {
             .build()
             .await
             .wrap_err("failed to build agent")?;
+        let now = chrono::Local::now().to_rfc3339();
         let info = AgentInfo {
             id: spec.id.clone(),
             task: String::new(),
@@ -252,6 +270,7 @@ impl Swarm {
             role: spec.role,
             perpetual: spec.perpetual,
             def_name: spec.def_name,
+            started: now,
         };
         self.agents
             .write()
@@ -439,36 +458,36 @@ impl Swarm {
     pub async fn generate_agent_def(&self, user_prompt: &str) -> Result<String> {
         let system = "\
 You are an expert at designing AI agent configurations for the Axon swarm system.
-Output ONLY a complete agent definition in the following format:
+Output raw markdown only. Do NOT wrap the output in any JSON, envelope, or structured format.
+Use this exact format, starting with --- and ending with the markdown body:
 
 ---
 name: <agent-name>
-model:  # leave empty for default
+model:  # leave empty to use default
 tools:
   - write_file
-# - delete_file
-# - run_command
-# - web_search
-# - add_task
-# - spawn_agent
-policy: auto_approve  # auto_approve or deny_destructive
+  - add_task
+  # - run_command
+  # - web_search
+policy: auto_approve
 memory_window: 20
 max_turns: 10
-schedule_mins:  # set to run on N-minute interval (blank = on-demand)
-task:  # recurring task description (if scheduled)
+schedule_mins: 15
+task:
+task_hint:
 ---
 
 # Agent instructions
 
-<detailed instructions for what this agent should do>
+<what this agent does>
 
-The user will describe the agent they want. Based on their description, \
-generate a complete agent definition. Choose appropriate tools, policy, \
-and write clear, actionable instructions. If they mention scheduling, \
-include schedule_mins and task fields. Only output the agent definition, \
-no explanation or commentary.";
+When done, call add_task(title=<name>, body=<markdown>) to submit your work for human review (body must be markdown).
 
-        let prompt = format!("{system}\n\nUser request: {user_prompt}\n\nGenerate the agent definition:");
+Based on the user's description, generate a complete agent definition. Choose appropriate tools, policy, \
+and write clear instructions. If relevant, include schedule_mins and task. Output raw markdown only — \
+no JSON, no commentary.";
+
+        let prompt = format!("{system}\n\nUser request: {user_prompt}");
 
         let req = CompletionRequest::builder(prompt)
             .max_tokens(2000)
@@ -481,7 +500,7 @@ no explanation or commentary.";
             .complete(&req, None)
             .await
             .wrap_err("LLM completion failed")?;
-        Ok(resp.text)
+        Ok(strip_json_envelope(&resp.text))
     }
 
     // -- event handling ---------------------------------------------------
@@ -523,10 +542,46 @@ no explanation or commentary.";
                     });
                 }
 
-                // Proactive agents re-arm after a cycle completes or fails.
-                if event_complete_result(&event).is_some()
-                    || matches!(event_status(&event), Some(AgentStatus::Error))
-                {
+                // On completion/error: record history, create review tasks,
+                // and re-arm proactive agents.
+                let is_complete = event_complete_result(&event).is_some();
+                let is_error = matches!(event_status(&event), Some(AgentStatus::Error));
+                if is_complete || is_error {
+                    let now = chrono::Local::now().to_rfc3339();
+                    let info = self.agents.read().await.get(&agent_id).map(|e| e.info.clone());
+                    if let Some(info) = info {
+                        let result = event_complete_result(&event);
+                        self.agent_history.lock().await.push_front(HistoricAgent {
+                            id: agent_id.clone(),
+                            task: info.task.clone(),
+                            model: info.model.clone(),
+                            status: info.status,
+                            def_name: info.def_name.clone(),
+                            started: info.started.clone(),
+                            completed: now,
+                            result: result.clone(),
+                        });
+                        self.prune_history();
+
+                        // Auto-create a review task for non-perpetual agents.
+                        if !info.perpetual && is_complete {
+                            if let Some(ref res) = result {
+                                let title = if info.task.is_empty() {
+                                    format!("Agent {} completed", &agent_id)
+                                } else {
+                                    info.task.clone()
+                                };
+                                let body = strip_json_envelope(res);
+                                let _ = store::add_task(
+                                    &title,
+                                    &format!("Auto-created from agent `{}`", &agent_id),
+                                    "agent",
+                                    &body,
+                                );
+                                self.broadcast_control("TasksChanged");
+                            }
+                        }
+                    }
                     self.on_scheduled_done(&agent_id).await;
                 }
             }
@@ -577,6 +632,14 @@ no explanation or commentary.";
     }
 
     /// Send a control frame (e.g. `Reload`, `TasksChanged`) to dashboard clients.
+    fn prune_history(&self) {
+        if let Ok(mut h) = self.agent_history.try_lock() {
+            while h.len() > 500 {
+                h.pop_back();
+            }
+        }
+    }
+
     pub(crate) fn broadcast_control(&self, kind: &str) {
         let mut map = serde_json::Map::new();
         map.insert(kind.to_string(), serde_json::json!({}));
@@ -618,4 +681,18 @@ fn event_complete_result(event: &Event) -> Option<String> {
         Event::TaskComplete { result, .. } => Some(result.clone()),
         _ => None,
     }
+}
+
+/// Some Ollama models wrap their response in a JSON envelope
+/// `{"done":true,"response":"...","tool_calls":[]}`. Strip it if present.
+fn strip_json_envelope(text: &str) -> String {
+    let t = text.trim();
+    if t.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+            if let Some(resp) = v.get("response").and_then(|r| r.as_str()) {
+                return resp.to_string();
+            }
+        }
+    }
+    text.to_string()
 }

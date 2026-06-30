@@ -513,13 +513,56 @@ fn TaskDetail(state: State) -> impl IntoView {
         None => view! { <h3 class="muted">"select a task to review"</h3> }.into_any(),
         Some(id) => {
             let task = state.all_tasks().into_iter().find(|t| t.id == id);
-            let status = task.map(|t| t.status).unwrap_or_default();
+            let status = task.as_ref().map(|t| t.status.clone()).unwrap_or_default();
+            let is_proposed = status == "proposed";
             let id_save = id.clone();
+
+            let accept = {
+                let id = id.clone();
+                let st = state;
+                move |_| {
+                    let id = id.clone();
+                    spawn_local(async move {
+                        let body = st.edit_body.get_untracked();
+                        let teams = st.teams.get_untracked();
+                        let team_id = teams.iter()
+                            .find(|t| !t.team.builtin)
+                            .map(|t| t.team.id.clone())
+                            .unwrap_or_else(|| "custom".to_string());
+                        let def = md_to_agent_def(&body, &blank_def(team_id.clone()));
+                        if !def.name.is_empty() {
+                            let _ = api::create_def(&team_id, &def).await;
+                            st.teams.set(api::fetch_teams().await);
+                        }
+                        let _ = api::update_task(&id, &st.edit_title.get_untracked(),
+                            &st.edit_body.get_untracked(), Some("implemented")).await;
+                        st.refresh_tasks();
+                    });
+                }
+            };
+
+            let reject = {
+                let id = id.clone();
+                let st = state;
+                move |_| {
+                    let id = id.clone();
+                    spawn_local(async move {
+                        let _ = api::update_task(&id, &st.edit_title.get_untracked(),
+                            &st.edit_body.get_untracked(), Some("rejected")).await;
+                        st.refresh_tasks();
+                    });
+                }
+            };
+
             view! {
                 <div class="row" style="margin-bottom:8px">
                     <h3 style="margin:0">{move || state.edit_title.get()}</h3>
                     <span class=format!("badge {status}")>{status.clone()}</span>
                     <span class="spacer"></span>
+                    {is_proposed.then(|| view! {
+                        <button style="color:var(--green);border-color:var(--green)" on:click=accept>"Accept"</button>
+                        <button style="color:var(--red);border-color:var(--red)" on:click=reject>"Reject"</button>
+                    })}
                     <button on:click=move |_| state.raw_mode.update(|r| *r = !*r)>
                         {move || if state.raw_mode.get() { "view" } else { "edit" }}</button>
                 </div>
@@ -536,14 +579,14 @@ fn TaskDetail(state: State) -> impl IntoView {
                             let id = id_save.clone();
                             spawn_local(async move {
                                 let _ = api::update_task(&id, &state.edit_title.get_untracked(),
-                                    &state.edit_body.get_untracked()).await;
+                                    &state.edit_body.get_untracked(), None).await;
                                 state.refresh_tasks();
                             });
                         }>"Save"</button>
                     }.into_any()
                 } else {
                     view! {
-                        <div class="md-preview" inner_html=move || md_to_html(&state.edit_body.get())></div>
+                        <div class="md-preview" inner_html=move || render_agent_md(&state.edit_body.get())></div>
                     }.into_any()
                 }}
             }.into_any()

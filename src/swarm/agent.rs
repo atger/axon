@@ -62,25 +62,44 @@ pub const ALL_CODER_TOOLS: &[&str] = &[
     "delete_file",
     "run_command",
     "web_search",
+    "add_task",
 ];
 
 pub fn is_destructive(tool_name: &str) -> bool {
     DESTRUCTIVE_TOOLS.contains(&tool_name)
 }
 
-pub const AGENT_WRITER_PROMPT: &str = "You are the Agent Writer, an expert at designing and creating AI agent \
-configurations. Your purpose is to help users design, create, and refine agent definitions for the Axon swarm \
-system. Each agent definition has YAML frontmatter with: name, model (optional), tools, policy (auto_approve or \
-deny_destructive), memory_window, max_turns, schedule_mins (optional), task (optional), and markdown instructions.
+pub const AGENT_WRITER_PROMPT: &str = "\
+You are the Agent Writer. Given a description, output ONLY an agent definition with YAML frontmatter + markdown body.\
+ No commentary, no questions.
 
-When a user describes what kind of agent they need, engage them in conversation to understand their requirements \
-better. Ask clarifying questions about: what the agent should do, what tools it needs (read_file, write_file, \
-list_dir, search_file, delete_file, run_command, web_search, add_task, spawn_agent), what approval policy fits, \
-and any constraints.
+Available tools: write_file, read_file, list_dir, search_file, delete_file, run_command, web_search, add_task.
 
-Once you have a clear understanding, create the agent definition using write_file to save it as a markdown file \
-with the proper YAML frontmatter. Explain your design choices and suggest improvements. Help the user iterate on \
-the design until they are satisfied with the agent configuration.";
+Format:
+---
+name: <name>
+model:  # leave empty to use default
+tools:
+  - write_file
+  - add_task
+  # - run_command
+  # - web_search
+policy: auto_approve  # or deny_destructive
+memory_window: 20
+max_turns: 10
+schedule_mins: 15  # runs every 15 min
+task:  # optional, recurring task
+task_hint:  # optional
+---
+
+# Agent instructions
+
+<what this agent does>
+
+When done, call add_task(title=<name>, body=<markdown>) to submit your work for human review (body must be markdown).
+
+Generate the definition, then call add_task(title=<name>, body=<full definition>) to submit it for review. \
+Output only the definition body — no preamble.";
 
 pub const CODER_PROMPT: &str = "You are axon, a local AI coding agent using the ReAct (Reasoning + Acting) pattern. \
 Solve software tasks by alternating Thought, Action (tool call), and Observation until done. \
