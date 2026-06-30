@@ -524,8 +524,12 @@ fn TimelineView(state: State) -> impl IntoView {
                                 let cycle_t = cs + idx as f64 * interval_s;
                                 let is_current = cycle_t <= now && cycle_t + interval_s > now;
                                 let is_past = cycle_t + interval_s <= now;
-                                if is_past { continue; }
-                                let (bar_start, bar_end, cls) = if is_current {
+                                let (bar_start, bar_end, cls) = if is_past {
+                                    (cycle_t, cycle_t, "past")
+                                } else if is_current {
+                                    let agent_alive = matches!(status, "running" | "queued");
+                                    let in_cycle = cycle_t <= cs && cs < cycle_t + interval_s;
+                                    if !agent_alive && !in_cycle { continue; }
                                     match status {
                                         "idle" | "done" => (cycle_t, cycle_t + interval_s * 0.15, "done"),
                                         "error" => (cycle_t, cycle_t + interval_s * 0.15, "error"),
@@ -541,6 +545,10 @@ fn TimelineView(state: State) -> impl IntoView {
                                 let bar_y = y_center - 8.0;
                                 let bar_h = 16.0;
                                 let rect = match cls {
+                                    "past" => view! {
+                                        <rect x={x1.to_string()} y={bar_y.to_string()} width={w.to_string()} height={bar_h.to_string()}
+                                            fill="var(--muted)" opacity="0.25" rx="1" />
+                                    }.into_any(),
                                     "future" => view! {
                                         <rect x={x1.to_string()} y={bar_y.to_string()} width={w.to_string()} height={bar_h.to_string()} rx="4"
                                             fill="var(--accent)" opacity="0.15" stroke="var(--accent)" stroke-width="1" stroke-dasharray="3,3" />
