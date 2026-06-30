@@ -52,7 +52,7 @@ impl ToolRuntime for AddTaskTool {
 #[derive(Serialize, Deserialize, ToolInput, Debug)]
 pub struct SpawnAgentArgs {
     #[input(
-        description = "Definition id of the agent to spawn (e.g. 'axon-coder', 'axon-researcher', or a user agent's id)"
+        description = "Definition id of the agent to spawn (e.g. 'agent-writer' or a user agent's id)"
     )]
     def_id: String,
     #[input(description = "The task for the spawned agent to work on")]

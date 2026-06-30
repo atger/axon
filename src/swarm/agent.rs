@@ -2,10 +2,8 @@
 //!
 //! `AgentDeriveT` is hand-implemented (not the `#[agent]` macro) so each agent
 //! can carry a **unique name** (the actor runtime registers actors by name) and
-//! a **role** that selects its scoped toolset + system prompt. Safety for the
-//! built-in pipeline is structural: a role only gets the tools it needs.
-//! Per-agent cancellation and (for generic `Coder` agents) a tool approval
-//! policy are enforced via `AgentHooks`.
+//! a **role** that selects its scoped toolset + system prompt.
+//! Per-agent cancellation and tool approval policy are enforced via `AgentHooks`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,12 +38,6 @@ pub enum ApprovalPolicy {
 pub enum Role {
     /// Generic user-spawned coding agent (full toolset, governed by policy).
     Coder,
-    /// Researches other agentic apps for frontend ideas (web + read-only).
-    Researcher,
-    /// Plans concrete tasks from research findings (add_task only).
-    Planner,
-    /// Implements an accepted OKF by editing frontend files (no shell).
-    Developer,
 }
 
 const DESTRUCTIVE_TOOLS: &[&str] = &[
@@ -76,6 +68,20 @@ pub fn is_destructive(tool_name: &str) -> bool {
     DESTRUCTIVE_TOOLS.contains(&tool_name)
 }
 
+pub const AGENT_WRITER_PROMPT: &str = "You are the Agent Writer, an expert at designing and creating AI agent \
+configurations. Your purpose is to help users design, create, and refine agent definitions for the Axon swarm \
+system. Each agent definition has YAML frontmatter with: name, model (optional), tools, policy (auto_approve or \
+deny_destructive), memory_window, max_turns, schedule_mins (optional), task (optional), and markdown instructions.
+
+When a user describes what kind of agent they need, engage them in conversation to understand their requirements \
+better. Ask clarifying questions about: what the agent should do, what tools it needs (read_file, write_file, \
+list_dir, search_file, delete_file, run_command, web_search, add_task, spawn_agent), what approval policy fits, \
+and any constraints.
+
+Once you have a clear understanding, create the agent definition using write_file to save it as a markdown file \
+with the proper YAML frontmatter. Explain your design choices and suggest improvements. Help the user iterate on \
+the design until they are satisfied with the agent configuration.";
+
 pub const CODER_PROMPT: &str = "You are axon, a local AI coding agent using the ReAct (Reasoning + Acting) pattern. \
 Solve software tasks by alternating Thought, Action (tool call), and Observation until done. \
 Tools: read_file, write_file, list_dir, search_file, delete_file (filesystem); \
@@ -95,23 +101,7 @@ code with read_file/list_dir/search_file and review it for correctness bugs, sec
 improvements. Cite findings as `file:line` and explain the impact and a suggested fix for each. Be \
 specific and prioritize high-confidence issues. You are read-only — do NOT edit, write, or run anything.";
 
-const RESEARCHER_PROMPT: &str = "You are axon's frontend researcher. Study how OTHER agentic / AI-agent \
-applications design their dashboards, UX, and features (use web_search). Use list_dir/read_file under \
-`frontend/` to understand axon's current dashboard. For EACH concrete, high-value idea worth adopting, \
-call the `add_task` tool exactly once (title, one-sentence description, comma-separated tags, and a \
-markdown body containing Rationale, Affected files under `frontend/`, and the proposed change). Do not \
-edit frontend files — only `add_task`. Avoid duplicating ideas already in the queue.";
 
-const PLANNER_PROMPT: &str = "You are axon's planner. You are given an APPROVED frontend task. Read the \
-relevant files under `frontend/` (read_file, list_dir, search_file) and produce a concrete, \
-step-by-step implementation plan: exactly which files to change and what to change (markup, CSS, \
-Leptos code). Output the plan as markdown. Planning only — do NOT edit files.";
-
-const DEVELOPER_PROMPT: &str = "You are axon's frontend developer. Implement the given accepted OKF \
-suggestion by editing files under `frontend/` (read_file, list_dir, search_file, write_file). Make \
-minimal, correct changes consistent with the existing Leptos (CSR) code so the project still compiles. \
-Do NOT run shell commands — building is handled for you. If told a previous build failed, fix those \
-errors and continue. When finished, summarize the files you changed.";
 
 /// Shared, runtime-mutable control surface for a single agent.
 pub struct AgentControl {
@@ -162,15 +152,9 @@ pub struct CodingAgent {
 }
 
 impl CodingAgent {
-    /// A built-in system-pipeline agent: prompt + tools fixed by role.
+    /// A built-in agent: prompt + tools fixed by role.
     pub fn with_role(name: impl Into<String>, role: Role, control: Arc<AgentControl>) -> Self {
-        let prompt = match role {
-            Role::Coder => CODER_PROMPT,
-            Role::Researcher => RESEARCHER_PROMPT,
-            Role::Planner => PLANNER_PROMPT,
-            Role::Developer => DEVELOPER_PROMPT,
-        }
-        .to_string();
+        let prompt = CODER_PROMPT.to_string();
         Self {
             name: name.into(),
             role,
@@ -223,50 +207,28 @@ impl AgentDeriveT for CodingAgent {
     }
 
     fn tools(&self) -> Vec<Box<dyn ToolT>> {
-        match self.role {
-            Role::Coder => {
-                let mut all: Vec<Box<dyn ToolT>> = vec![
-                    Box::new(ReadFile::new()),
-                    Box::new(WriteFile::new()),
-                    Box::new(ListDir::new()),
-                    Box::new(SearchFile::new(100)),
-                    Box::new(DeleteFile::new()),
-                    Box::new(RunCommandTool {}),
-                    Box::new(WebSearchTool {}),
-                    Box::new(AddTaskTool {}),
-                ];
-                if let Some(tx) = &self.spawn_tx {
-                    all.push(Box::new(SpawnAgentTool { tx: tx.clone() }));
-                }
-                match &self.allowed_tools {
-                    // Keep read-only tools always; otherwise honor the allow-list.
-                    Some(allowed) => all
-                        .into_iter()
-                        .filter(|t| {
-                            READONLY_TOOLS.contains(&t.name()) || allowed.iter().any(|a| a == t.name())
-                        })
-                        .collect(),
-                    None => all,
-                }
-            }
-            Role::Researcher => vec![
-                Box::new(WebSearchTool {}),
-                Box::new(ReadFile::new()),
-                Box::new(ListDir::new()),
-                Box::new(SearchFile::new(100)),
-                Box::new(AddTaskTool {}),
-            ],
-            Role::Planner => vec![
-                Box::new(ReadFile::new()),
-                Box::new(ListDir::new()),
-                Box::new(SearchFile::new(100)),
-            ],
-            Role::Developer => vec![
-                Box::new(ReadFile::new()),
-                Box::new(WriteFile::new()),
-                Box::new(ListDir::new()),
-                Box::new(SearchFile::new(100)),
-            ],
+        let mut all: Vec<Box<dyn ToolT>> = vec![
+            Box::new(ReadFile::new()),
+            Box::new(WriteFile::new()),
+            Box::new(ListDir::new()),
+            Box::new(SearchFile::new(100)),
+            Box::new(DeleteFile::new()),
+            Box::new(RunCommandTool {}),
+            Box::new(WebSearchTool {}),
+            Box::new(AddTaskTool {}),
+        ];
+        if let Some(tx) = &self.spawn_tx {
+            all.push(Box::new(SpawnAgentTool { tx: tx.clone() }));
+        }
+        match &self.allowed_tools {
+            // Keep read-only tools always; otherwise honor the allow-list.
+            Some(allowed) => all
+                .into_iter()
+                .filter(|t| {
+                    READONLY_TOOLS.contains(&t.name()) || allowed.iter().any(|a| a == t.name())
+                })
+                .collect(),
+            None => all,
         }
     }
 }

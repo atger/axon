@@ -9,10 +9,7 @@ use color_eyre::eyre::{Result, WrapErr, bail};
 use rusqlite::{OptionalExtension, Row, params};
 use serde::{Deserialize, Serialize};
 
-use crate::swarm::agent::{
-    ALL_CODER_TOOLS, ApprovalPolicy, CODER_PROMPT, READONLY_TOOLS, RESEARCH_AGENT_PROMPT,
-    REVIEWER_PROMPT,
-};
+use crate::swarm::agent::{AGENT_WRITER_PROMPT, ALL_CODER_TOOLS, ApprovalPolicy};
 use crate::swarm::store::{conn, slug};
 
 /// A named group of agent definitions.
@@ -95,29 +92,13 @@ pub fn builtin_teams() -> Vec<TeamWithAgents> {
         task: None,
         builtin: true,
     };
-    let agents = vec![
-        def(
-            "axon-coder",
-            "Coder",
-            CODER_PROMPT,
-            owned(ALL_CODER_TOOLS),
-            ApprovalPolicy::AutoApprove,
-        ),
-        def(
-            "axon-researcher",
-            "Researcher",
-            RESEARCH_AGENT_PROMPT,
-            owned(&["web_search", "read_file", "list_dir", "search_file"]),
-            ApprovalPolicy::AutoApprove,
-        ),
-        def(
-            "axon-reviewer",
-            "Reviewer",
-            REVIEWER_PROMPT,
-            owned(READONLY_TOOLS),
-            ApprovalPolicy::DenyDestructive,
-        ),
-    ];
+    let agents = vec![def(
+        "agent-writer",
+        "Agent Writer",
+        AGENT_WRITER_PROMPT,
+        owned(ALL_CODER_TOOLS),
+        ApprovalPolicy::AutoApprove,
+    )];
     vec![TeamWithAgents {
         team: Team {
             id: BUILTIN_TEAM_ID.to_string(),

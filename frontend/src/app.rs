@@ -54,28 +54,11 @@ impl State {
         });
     }
 
-    fn refresh_teams(self) {
-        spawn_local(async move {
-            self.teams.set(api::fetch_teams().await);
-        });
-    }
-
     /// All tasks across active + history (for resolving the selected one).
     fn all_tasks(self) -> Vec<Task> {
         let mut v = self.tasks.get();
         v.extend(self.history.get());
         v
-    }
-
-    /// The active task to select after `removed` leaves the active list:
-    /// the next one in the list, else the previous, else None.
-    fn next_active_after(self, removed: &str) -> Option<Task> {
-        let tasks = self.tasks.get();
-        let idx = tasks.iter().position(|t| t.id == removed)?;
-        tasks
-            .get(idx + 1)
-            .or_else(|| idx.checked_sub(1).and_then(|i| tasks.get(i)))
-            .cloned()
     }
 
     /// Point the selection + editor at `t`, or clear both when `None`.
@@ -167,14 +150,9 @@ fn agents_view(state: State) -> impl IntoView {
     let raw_mode = RwSignal::new(false);
     let show_spawn = RwSignal::new(false);
     let spawn_task = RwSignal::new(String::new());
-
-    // All agent defs flattened from all teams, sorted by name.
-    let all_defs = move || {
-        let mut defs: Vec<AgentDef> = state.teams.get().into_iter()
-            .flat_map(|t| t.agents).collect();
-        defs.sort_by(|a, b| a.name.cmp(&b.name));
-        defs
-    };
+    let show_new_chat = RwSignal::new(false);
+    let new_chat_prompt = RwSignal::new(String::new());
+    let generating = RwSignal::new(false);
 
     let open_def = move |d: AgentDef| {
         ed_md.set(agent_def_to_md(&d));
@@ -184,6 +162,7 @@ fn agents_view(state: State) -> impl IntoView {
         spawn_task.set(String::new());
         state.editing_def.set(true);
         state.selected.set(None);
+        show_new_chat.set(false);
     };
 
     let save = move |_| {
@@ -236,32 +215,37 @@ fn agents_view(state: State) -> impl IntoView {
                     <h3 class="section" style="margin:0">"DEFINITIONS"</h3>
                     <span class="spacer"></span>
                     <button on:click=move |_| {
-                        let d = blank_def("custom".to_string());
-                        ed_md.set(agent_def_to_md(&d));
-                        ed_def.set(Some(d));
-                        raw_mode.set(false);
-                        show_spawn.set(false);
-                        spawn_task.set(String::new());
-                        state.editing_def.set(true);
+                        show_new_chat.set(true);
+                        new_chat_prompt.set(String::new());
+                        generating.set(false);
+                        state.editing_def.set(false);
                         state.selected.set(None);
                     }>"+ New"</button>
                 </div>
                 <div class="agents">
                     {move || {
-                        let defs = all_defs();
-                        if defs.is_empty() {
+                        let teams = state.teams.get();
+                        let mut items = Vec::new();
+                        for tw in &teams {
+                            for a in &tw.agents {
+                                items.push((tw.team.name.clone(), a.clone()));
+                            }
+                        }
+                        if items.is_empty() {
                             view! { <div class="empty">"no definitions yet"</div> }.into_any()
                         } else {
-                            defs.into_iter().map(|a| {
+                            items.into_iter().map(|(team_name, a)| {
                                 let aid = a.id.clone();
                                 let is_sel = move || state.editing_def.get()
                                     && ed_def.get().as_ref().map(|d| d.id == aid).unwrap_or(false);
                                 let ac = a.clone();
                                 let a_clone = a.clone();
+                                let tn = team_name.clone();
                                 view! {
                                     <div class=move || if is_sel() { "agent sel" } else { "agent" }
                                         on:click=move |_| open_def(a_clone.clone())>
                                         <div class="row">
+                                            <span class="badge sys">{tn.clone()}</span>
                                             <span class="id">{ac.name.clone()}</span>
                                             {ac.schedule_mins.map(|m| view! { <span class="badge sys">{format!("⏲ {m}m")}</span> })}
                                             <span class="spacer"></span>
@@ -293,7 +277,55 @@ fn agents_view(state: State) -> impl IntoView {
             </div>
             <div class="right">
                 {move || {
-                    if state.editing_def.get() {
+                    if show_new_chat.get() && !state.editing_def.get() {
+                        let is_gen = generating.get();
+                        let prompt_val = new_chat_prompt.get();
+                        view! {
+                            <div>
+                                <div class="row" style="margin-bottom:8px">
+                                    <h3 style="margin:0">"Create a new agent"</h3>
+                                    <span class="spacer"></span>
+                                    <button on:click=move |_| { show_new_chat.set(false); }>"Cancel"</button>
+                                </div>
+                                <div class="field">
+                                    <label>"Describe the agent you want to build"</label>
+                                    <textarea
+                                        prop:value=move || new_chat_prompt.get()
+                                        on:input=move |e| new_chat_prompt.set(event_target_value(&e))
+                                        placeholder="e.g. I need an agent that reviews code for security vulnerabilities and suggests fixes..."
+                                        style="min-height:120px"
+                                    ></textarea>
+                                </div>
+                                <button
+                                    disabled=is_gen || prompt_val.trim().is_empty()
+                                    on:click=move |_| {
+                                        let p = new_chat_prompt.get_untracked().trim().to_string();
+                                        if p.is_empty() { return; }
+                                        generating.set(true);
+                                        spawn_local(async move {
+                                            match api::generate_def(&p).await {
+                                                Ok(md) => {
+                                                    let blank = blank_def("custom".to_string());
+                                                    let def = md_to_agent_def(&md, &blank);
+                                                    ed_md.set(md);
+                                                    ed_def.set(Some(def));
+                                                    raw_mode.set(true);
+                                                    show_new_chat.set(false);
+                                                    state.editing_def.set(true);
+                                                }
+                                                Err(e) => {
+                                                    web_sys::console::log_1(&format!("generate error: {e}").into());
+                                                }
+                                            }
+                                            generating.set(false);
+                                        });
+                                    }
+                                >
+                                    {move || if generating.get() { "Generating…" } else { "Generate" }}
+                                </button>
+                            </div>
+                        }.into_any()
+                    } else if state.editing_def.get() {
                         let ro = move || ed_def.get().map(|d| d.builtin).unwrap_or(false);
                         view! {
                             <div class="row" style="margin-bottom:8px">
@@ -491,13 +523,8 @@ fn TaskDetail(state: State) -> impl IntoView {
         None => view! { <h3 class="muted">"select a task to review"</h3> }.into_any(),
         Some(id) => {
             let task = state.all_tasks().into_iter().find(|t| t.id == id);
-            let actionable = task.as_ref().map(|t| {
-                matches!(t.status.as_str(), "proposed" | "accepted")
-            }).unwrap_or(false);
             let status = task.map(|t| t.status).unwrap_or_default();
             let id_save = id.clone();
-            let id_accept = id.clone();
-            let id_reject = id.clone();
             view! {
                 <div class="row" style="margin-bottom:8px">
                     <h3 style="margin:0">{move || state.edit_title.get()}</h3>
@@ -505,21 +532,6 @@ fn TaskDetail(state: State) -> impl IntoView {
                     <span class="spacer"></span>
                     <button on:click=move |_| state.raw_mode.update(|r| *r = !*r)>
                         {move || if state.raw_mode.get() { "view" } else { "edit" }}</button>
-                    {actionable.then(|| view! {
-                        <button on:click=move |_| {
-                            let id = id_accept.clone();
-                            spawn_local(async move { api::accept_task(&id).await; state.refresh_tasks(); });
-                        }>"Accept"</button>
-                        <button class="danger" on:click=move |_| {
-                            let id = id_reject.clone();
-                            let next = state.next_active_after(&id);
-                            spawn_local(async move {
-                                api::reject_task(&id).await;
-                                state.refresh_tasks();
-                                state.select_task(next);
-                            });
-                        }>"Reject"</button>
-                    })}
                 </div>
                 {move || if state.raw_mode.get() {
                     let id_save = id_save.clone();

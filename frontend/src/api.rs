@@ -208,6 +208,22 @@ pub async fn delete_def(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Deserialize)]
+struct GenerateResp {
+    markdown: String,
+}
+
+pub async fn generate_def(prompt: &str) -> Result<String, String> {
+    let resp = Request::post("/api/agent-defs/generate")
+        .json(&serde_json::json!({ "prompt": prompt }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let body: GenerateResp = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(body.markdown)
+}
+
 pub async fn cancel_agent(id: String) {
     let _ = Request::delete(&format!("/api/agents/{id}")).send().await;
 }
@@ -238,14 +254,6 @@ pub async fn update_task(id: &str, title: &str, body: &str) -> Result<(), String
          .await
          .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-pub async fn accept_task(id: &str) {
-    let _ = Request::post(&format!("/api/tasks/{id}/accept")).send().await;
-}
-
-pub async fn reject_task(id: &str) {
-    let _ = Request::post(&format!("/api/tasks/{id}/reject")).send().await;
 }
 
 /// Build the absolute `ws(s)://host/ws` URL from the current page location.

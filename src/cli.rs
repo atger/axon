@@ -27,15 +27,6 @@ pub struct ServeCmd {
     /// Max agents decoding concurrently (real parallelism needs OLLAMA_NUM_PARALLEL).
     #[arg(long, default_value_t = 1)]
     pub max_concurrency: usize,
-    /// Disable the built-in researcher→okf-writer→developer pipeline.
-    #[arg(long)]
-    pub no_research_agent: bool,
-    /// Seconds between research cycles for the pipeline.
-    #[arg(long, default_value_t = 300)]
-    pub research_interval: u64,
-    /// Max build-fix attempts the developer agent makes per accepted suggestion.
-    #[arg(long, default_value_t = 5)]
-    pub max_implement_attempts: usize,
 }
 
 #[derive(clap::Args, Debug)]

@@ -60,18 +60,7 @@ async fn main() -> color_eyre::Result<()> {
     // Swarm dashboard: builds its own AutoAgents (Ollama) provider, not the
     // legacy Backend, so handle it before any daemon/backend setup.
     if let Some(Command::Serve(cmd)) = &args.command {
-        let research_interval = if cmd.no_research_agent {
-            None
-        } else {
-            Some(std::time::Duration::from_secs(cmd.research_interval))
-        };
-        let swarm = swarm::Swarm::new(
-            &model,
-            &ollama_url,
-            research_interval,
-            cmd.max_implement_attempts,
-        )
-        .await?;
+        let swarm = swarm::Swarm::new(&model, &ollama_url).await?;
         return server::run_server(swarm, cmd.host.clone(), cmd.port).await;
     }
 

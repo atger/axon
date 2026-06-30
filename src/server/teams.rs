@@ -88,3 +88,15 @@ pub async fn delete_def(State(swarm): State<Arc<Swarm>>, Path(id): Path<String>)
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     }
 }
+
+#[derive(Deserialize)]
+pub struct GenerateReq {
+    prompt: String,
+}
+
+pub async fn generate_def(State(swarm): State<Arc<Swarm>>, Json(req): Json<GenerateReq>) -> Response {
+    match swarm.generate_agent_def(&req.prompt).await {
+        Ok(text) => Json(serde_json::json!({ "markdown": text })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": e.to_string() }))).into_response(),
+    }
+}
