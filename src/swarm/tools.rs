@@ -31,7 +31,7 @@ pub struct AddTaskArgs {
 /// agent cannot produce a malformed task record.
 #[tool(
     name = "add_task",
-    description = "Add one concrete frontend task to the TO DO queue (status: proposed). Returns its id.",
+    description = "Add one concrete frontend task to the tasks queue (status: proposed). Returns its id.",
     input = AddTaskArgs
 )]
 pub struct AddTaskTool {}

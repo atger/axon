@@ -1,4 +1,4 @@
-//! Leptos dashboard: an Agents view (spawn/monitor/cancel) and a TO DO view
+//! Leptos dashboard: an Agents view (spawn/monitor/cancel) and a Tasks view
 //! (review/edit/accept/reject the task queue the pipeline produces).
 
 use std::collections::HashMap;
@@ -133,7 +133,7 @@ pub fn App() -> impl IntoView {
             <nav>
                 <button class:active=move || state.tab.get() == ViewTab::Tasks
                     on:click=move |_| { state.tab.set(ViewTab::Tasks); state.refresh_tasks(); }>
-                    "TO DO"</button>
+                    "Tasks"</button>
                 <button class:active=move || state.tab.get() == ViewTab::Agents
                     on:click=move |_| { state.tab.set(ViewTab::Agents); state.editing_def.set(false); state.selected.set(None); }>"Agents"</button>
             </nav>
@@ -449,7 +449,7 @@ fn blank_def(team_id: String) -> AgentDef {
 }
 
 // --------------------------------------------------------------------------
-// TO DO (tasks) view
+// Tasks view
 // --------------------------------------------------------------------------
 
 fn tasks_view(state: State) -> impl IntoView {
