@@ -300,9 +300,13 @@ impl Swarm {
     async fn publish_to(&self, id: &str, task_text: String) -> Result<()> {
         let task = Task::new(task_text.clone());
         let sub_id = task.submission_id;
+        eprintln!("[swarm] publish_to: id={id} sub_id={sub_id} task_len={}", task_text.len());
         if let Some(e) = self.agents.write().await.get_mut(id) {
             e.info.task = task_text;
             e.info.status = AgentStatus::Queued;
+            eprintln!("[swarm] publish_to: found agent, set status=Queued");
+        } else {
+            eprintln!("[swarm] publish_to: agent {id} NOT found in agents map");
         }
         self.sub_index.write().await.insert(sub_id, id.to_string());
         self.runtime
@@ -313,7 +317,23 @@ impl Swarm {
     }
 
     /// Spawn a user agent from a saved definition and give it a task.
-    pub async fn spawn_from_def(&self, def: AgentDef, task: String) -> Result<String> {
+    /// When the definition has a non-zero `schedule_mins` and a recurring
+    /// `task`, this delegates to the proactive scheduling system instead so the
+    /// agent re-runs on its configured interval.
+    pub async fn spawn_from_def(self: &Arc<Self>, def: AgentDef, task: String) -> Result<String> {
+        // If the def is configured for proactive scheduling, route through the
+        // schedule system (perpetual, auto-re-arming) instead of a one-shot.
+        let has_schedule = def.schedule_mins.unwrap_or(0) > 0;
+        eprintln!(
+            "[swarm] spawn_from_def: id={} name={} schedule_mins={:?} task={:?} has_schedule={has_schedule}",
+            def.id, def.name, def.schedule_mins, def.task,
+        );
+        if has_schedule {
+            // Use the Spawn-provided task as the recurring task override so
+            // the agent works even when the def hasn't pre-configured a task.
+            return self.start_schedule(def, Some(task)).await;
+        }
+
         let id = format!("agent-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
         let default = self.model.read().await.clone();
         let model = def.model.clone().unwrap_or(default);
@@ -349,6 +369,11 @@ impl Swarm {
                 for def in tw.agents {
                     let has_task = def.task.as_deref().map(|t| !t.trim().is_empty()).unwrap_or(false);
                     if !def.builtin && def.schedule_mins.unwrap_or(0) > 0 && has_task {
+                        eprintln!(
+                            "[swarm] resync: found scheduled def id={} name={} mins={} task={}",
+                            def.id, def.name, def.schedule_mins.unwrap_or(0),
+                            def.task.as_deref().unwrap_or("")
+                        );
                         desired.insert(def.id.clone(), def);
                     }
                 }
@@ -366,6 +391,7 @@ impl Swarm {
         for (def_id, sig) in current {
             let keep = desired.get(&def_id).map(|d| def_sig(d) == sig).unwrap_or(false);
             if !keep {
+                eprintln!("[swarm] resync: removing schedule for def_id={def_id}");
                 self.remove_schedule(&def_id).await;
             }
         }
@@ -373,19 +399,31 @@ impl Swarm {
         for (def_id, def) in desired {
             let running = self.sched_index.lock().await.contains_key(&def_id);
             if !running {
-                let _ = self.start_schedule(def).await;
+                match self.start_schedule(def, None).await {
+                    Ok(aid) => eprintln!("[swarm] resync: started schedule agent_id={aid} for def_id={def_id}"),
+                    Err(e) => eprintln!("[swarm] resync: failed to start schedule for def_id={def_id}: {e}"),
+                }
+            } else {
+                eprintln!("[swarm] resync: schedule already running for def_id={def_id}");
             }
         }
     }
 
     /// Build and launch one proactive agent for `def`, and register its loop.
-    async fn start_schedule(self: &Arc<Self>, def: AgentDef) -> Result<()> {
+    /// When `task_override` is provided (non-empty), it is used as the recurring
+    /// task instead of `def.task`. This lets the Spawn API supply the recurring
+    /// task when the user hasn't pre-configured one on the def.
+    /// Returns the spawned agent id (e.g. `sched-{def_id}-{N}`).
+    async fn start_schedule(self: &Arc<Self>, def: AgentDef, task_override: Option<String>) -> Result<String> {
         let Some(mins) = def.schedule_mins else {
-            return Ok(());
+            return Err(color_eyre::eyre::eyre!("start_schedule: no schedule_mins"));
         };
-        let task = def.task.clone().unwrap_or_default();
+        let task = task_override
+            .filter(|t| !t.trim().is_empty())
+            .or_else(|| def.task.clone())
+            .unwrap_or_default();
         if mins == 0 || task.trim().is_empty() {
-            return Ok(());
+            return Err(color_eyre::eyre::eyre!("start_schedule: mins=0 or task empty"));
         }
         let interval = Duration::from_secs(mins * 60);
         let agent_id = format!("sched-{}-{}", def.id, self.next_id.fetch_add(1, Ordering::SeqCst));
@@ -415,8 +453,9 @@ impl Swarm {
             .lock()
             .await
             .insert(def.id.clone(), (agent_id.clone(), def_sig(&def)));
+        eprintln!("[swarm] start_schedule: agent_id={agent_id} interval={mins}min publishing first task");
         self.publish_to(&agent_id, task).await?;
-        Ok(())
+        Ok(agent_id)
     }
 
     /// Stop and deregister the proactive agent for `def_id` (if any).
@@ -424,6 +463,7 @@ impl Swarm {
         let Some((agent_id, _)) = self.sched_index.lock().await.remove(def_id) else {
             return;
         };
+        eprintln!("[swarm] remove_schedule: def_id={def_id} agent_id={agent_id}");
         self.scheduled.lock().await.remove(&agent_id);
         if let Some(entry) = self.agents.write().await.get_mut(&agent_id) {
             entry.control.cancel();
@@ -435,6 +475,9 @@ impl Swarm {
 
     pub async fn cancel(&self, id: &str) -> bool {
         if let Some(entry) = self.agents.write().await.get_mut(id) {
+            if entry.info.perpetual && entry.info.status == AgentStatus::Idle {
+                return true;
+            }
             entry.control.cancel();
             entry.info.status = AgentStatus::Cancelled;
             true
@@ -443,9 +486,12 @@ impl Swarm {
         }
     }
 
-    /// Cancel every running agent.
+    /// Cancel every running agent (skips perpetual idle agents between cycles).
     pub async fn cancel_all(&self) {
         for entry in self.agents.write().await.values_mut() {
+            if entry.info.perpetual && entry.info.status == AgentStatus::Idle {
+                continue;
+            }
             entry.control.cancel();
             if matches!(entry.info.status, AgentStatus::Queued | AgentStatus::Running) {
                 entry.info.status = AgentStatus::Cancelled;
@@ -551,6 +597,10 @@ no JSON, no commentary.";
                     let info = self.agents.read().await.get(&agent_id).map(|e| e.info.clone());
                     if let Some(info) = info {
                         let result = event_complete_result(&event);
+                        eprintln!(
+                            "[swarm] event_pump: agent={agent_id} status={:?} perpetual={} is_complete={is_complete} is_error={is_error}",
+                            info.status, info.perpetual,
+                        );
                         self.agent_history.lock().await.push_front(HistoricAgent {
                             id: agent_id.clone(),
                             task: info.task.clone(),
@@ -581,6 +631,8 @@ no JSON, no commentary.";
                                 self.broadcast_control("TasksChanged");
                             }
                         }
+                    } else {
+                        eprintln!("[swarm] event_pump: agent={agent_id} completed but NOT found in agents map");
                     }
                     self.on_scheduled_done(&agent_id).await;
                 }
@@ -594,23 +646,31 @@ no JSON, no commentary.";
     /// rescheduled.
     async fn on_scheduled_done(self: &Arc<Self>, agent_id: &str) {
         let Some(entry) = self.scheduled.lock().await.get(agent_id).cloned() else {
-            return; // not a scheduled agent
+            eprintln!("[swarm] on_scheduled_done: agent={agent_id} NOT in scheduled map (not a scheduled agent)");
+            return;
         };
+        eprintln!(
+            "[swarm] on_scheduled_done: agent={agent_id} scheduling next cycle in {}s",
+            entry.interval.as_secs()
+        );
         self.broadcast_control("TasksChanged");
         let me = Arc::clone(self);
         let id = agent_id.to_string();
         tokio::spawn(async move {
             tokio::time::sleep(entry.interval).await;
-            let cancelled = me
-                .agents
-                .read()
-                .await
-                .get(&id)
-                .map(|e| e.control.is_cancelled())
-                .unwrap_or(true);
+            let status = me.agents.read().await.get(&id).map(|e| e.info.status);
+            let alive = status.map(|s| s != AgentStatus::Cancelled).unwrap_or(false);
             let still_scheduled = me.scheduled.lock().await.contains_key(&id);
-            if !cancelled && still_scheduled {
-                let _ = me.publish_to(&id, entry.task).await;
+            eprintln!(
+                "[swarm] on_scheduled_done: wake agent={id} alive={alive} status={:?} still_scheduled={still_scheduled}",
+                status
+            );
+            if alive && still_scheduled {
+                if let Err(e) = me.publish_to(&id, entry.task).await {
+                    eprintln!("[swarm] on_scheduled_done: failed to re-publish for {id}: {e}");
+                } else {
+                    eprintln!("[swarm] on_scheduled_done: re-published task for {id}");
+                }
             }
         });
     }
