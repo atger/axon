@@ -128,8 +128,8 @@ fn def_sig(def: &AgentDef) -> String {
 
 pub struct Swarm {
     runtime: Arc<SingleThreadedRuntime>,
-    llm: Arc<dyn LLMProvider>,
-    model: String,
+    llm: RwLock<Arc<dyn LLMProvider>>,
+    model: RwLock<String>,
     ollama_url: String,
     agents: RwLock<HashMap<String, AgentEntry>>,
     sub_index: RwLock<HashMap<SubmissionId, String>>,
@@ -168,8 +168,8 @@ impl Swarm {
 
         let swarm = Arc::new(Self {
             runtime,
-            llm,
-            model: model.to_string(),
+            llm: RwLock::new(llm),
+            model: RwLock::new(model.to_string()),
             ollama_url: ollama_url.to_string(),
             agents: RwLock::new(HashMap::new()),
             sub_index: RwLock::new(HashMap::new()),
@@ -212,8 +212,8 @@ impl Swarm {
         self.agents.read().await.get(id).map(|e| e.info.clone())
     }
 
-    pub fn model(&self) -> &str {
-        &self.model
+    pub async fn model(&self) -> String {
+        self.model.read().await.clone()
     }
 
     pub fn ollama_url(&self) -> &str {
@@ -262,9 +262,10 @@ impl Swarm {
 
     /// Resolve the LLM provider for a model: reuse the shared one when the model
     /// matches, otherwise build a per-agent Ollama provider.
-    fn provider_for(&self, model: &str) -> Result<Arc<dyn LLMProvider>> {
-        if model == self.model {
-            Ok(self.llm.clone())
+    async fn provider_for(&self, model: &str) -> Result<Arc<dyn LLMProvider>> {
+        let current = self.model.read().await;
+        if model == *current {
+            Ok(self.llm.read().await.clone())
         } else {
             let p: Arc<dyn LLMProvider> =
                 LLMBuilder::<autoagents::llm::backends::ollama::Ollama>::new()
@@ -295,8 +296,9 @@ impl Swarm {
     /// Spawn a user agent from a saved definition and give it a task.
     pub async fn spawn_from_def(&self, def: AgentDef, task: String) -> Result<String> {
         let id = format!("agent-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
-        let model = def.model.clone().unwrap_or_else(|| self.model.clone());
-        let llm = self.provider_for(&model)?;
+        let default = self.model.read().await.clone();
+        let model = def.model.clone().unwrap_or(default);
+        let llm = self.provider_for(&model).await?;
         self.build_agent(AgentSpec {
             id: id.clone(),
             role: Role::Coder,
@@ -368,8 +370,9 @@ impl Swarm {
         }
         let interval = Duration::from_secs(mins * 60);
         let agent_id = format!("sched-{}-{}", def.id, self.next_id.fetch_add(1, Ordering::SeqCst));
-        let model = def.model.clone().unwrap_or_else(|| self.model.clone());
-        let llm = self.provider_for(&model)?;
+        let default = self.model.read().await.clone();
+        let model = def.model.clone().unwrap_or(default);
+        let llm = self.provider_for(&model).await?;
         self.build_agent(AgentSpec {
             id: agent_id.clone(),
             role: Role::Coder,
@@ -473,6 +476,8 @@ no explanation or commentary.";
             .build();
         let resp = self
             .llm
+            .read()
+            .await
             .complete(&req, None)
             .await
             .wrap_err("LLM completion failed")?;
@@ -555,8 +560,24 @@ no explanation or commentary.";
         });
     }
 
+    /// Switch the default model at runtime. Rebuilds the shared Ollama provider.
+    pub async fn set_model(&self, new_model: &str) -> Result<()> {
+        let provider: Arc<dyn LLMProvider> =
+            LLMBuilder::<autoagents::llm::backends::ollama::Ollama>::new()
+                .base_url(&self.ollama_url)
+                .model(new_model)
+                .build()
+                .wrap_err_with(|| {
+                    format!("failed to build provider for model `{new_model}`")
+                })?;
+        *self.llm.write().await = provider;
+        *self.model.write().await = new_model.to_string();
+        self.broadcast_control("ModelChanged");
+        Ok(())
+    }
+
     /// Send a control frame (e.g. `Reload`, `TasksChanged`) to dashboard clients.
-    fn broadcast_control(&self, kind: &str) {
+    pub(crate) fn broadcast_control(&self, kind: &str) {
         let mut map = serde_json::Map::new();
         map.insert(kind.to_string(), serde_json::json!({}));
         let _ = self.events_tx.send(SwarmEvent {

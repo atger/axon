@@ -3,13 +3,13 @@ use std::time::Duration;
 
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-    MouseEventKind,
+    MouseButton, MouseEventKind,
 };
 use ratatui::{
     DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    text::Line,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use tokio::sync::{mpsc, oneshot};
@@ -27,6 +27,8 @@ use crate::ui::{
     status::{self, GenState},
 };
 
+const SELECTOR_MAX_VISIBLE: usize = 10;
+
 enum AppEvent {
     Crossterm(Event),
     StreamDelta(String),
@@ -37,6 +39,13 @@ enum AppEvent {
         args_summary: String,
         confirm_tx: oneshot::Sender<bool>,
     },
+}
+
+struct ModelSelector {
+    visible: bool,
+    models: Vec<String>,
+    selected: usize,
+    scroll: usize,
 }
 
 enum Generating {
@@ -71,6 +80,8 @@ pub struct App<'a> {
     connecting: bool,
     /// User scrolled up manually; suppress auto-scroll-to-bottom while true.
     user_scrolled: bool,
+    model_selector: ModelSelector,
+    model_name_rect: Rect,
 }
 
 impl<'a> App<'a> {
@@ -99,6 +110,13 @@ impl<'a> App<'a> {
             generating: Generating::Idle,
             connecting: false,
             user_scrolled: false,
+            model_selector: ModelSelector {
+                visible: false,
+                models: Vec::new(),
+                selected: 0,
+                scroll: 0,
+            },
+            model_name_rect: Rect::new(0, 0, 0, 0),
         }
     }
 
@@ -123,6 +141,45 @@ impl<'a> App<'a> {
                 }
             }
         });
+
+        // Populate available models based on backend kind
+        self.model_selector.models = match self.backend_kind {
+            BackendKind::Local => {
+                let mut models: Vec<String> = crate::llm::local::known_models()
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                let cfg = crate::config::AxonConfig::load();
+                for m in &cfg.models {
+                    if !models.contains(&m.name) {
+                        models.push(m.name.clone());
+                    }
+                }
+                models
+            }
+            BackendKind::Ollama => {
+                let mut models: Vec<String> = crate::llm::local::known_models()
+                    .into_iter()
+                    .map(String::from)
+                    .collect();
+                let ollama_list =
+                    crate::llm::ollama::list_available(&self.ollama_url).await;
+                for m in ollama_list {
+                    if !models.contains(&m) {
+                        models.push(m);
+                    }
+                }
+                models
+            }
+        };
+        if let Some(pos) = self
+            .model_selector
+            .models
+            .iter()
+            .position(|m| m == self.backend.model_name())
+        {
+            self.model_selector.selected = pos;
+        }
 
         while self.running {
             terminal.draw(|f| self.render(f))?;
@@ -176,13 +233,21 @@ impl<'a> App<'a> {
             .collect();
         self.chat.render(frame, chunks[0], &display_msgs, streaming);
         self.input.render(frame, chunks[1]);
-        status::render(
-            frame,
-            chunks[2],
-            self.backend.model_name(),
-            self.context.branch(),
-            &gen_state,
-        );
+
+        let model_name = self.backend.model_name();
+        let status_bar = chunks[2];
+        self.model_name_rect = Rect {
+            x: status_bar.x + 7, // " axon │"
+            y: status_bar.y,
+            width: model_name.len() as u16 + 2, // " {model} "
+            height: 1,
+        };
+        status::render(frame, status_bar, model_name, self.context.branch(), &gen_state);
+
+        // Model selector overlay
+        if self.model_selector.visible {
+            render_model_selector(frame, area, &self.model_selector, model_name);
+        }
 
         // Confirmation overlay — rendered on top when awaiting user approval.
         if let Generating::AwaitingConfirm {
@@ -214,6 +279,16 @@ impl<'a> App<'a> {
                     self.chat.scroll_down(3);
                     if self.chat.scroll_offset == 0 {
                         self.user_scrolled = false;
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let rect = self.model_name_rect;
+                    if mouse.column >= rect.x
+                        && mouse.column < rect.x + rect.width
+                        && mouse.row >= rect.y
+                        && mouse.row < rect.y + rect.height
+                    {
+                        self.model_selector.visible = !self.model_selector.visible;
                     }
                 }
                 _ => {}
@@ -288,6 +363,47 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
+        // Model selector navigation takes precedence when visible
+        if self.model_selector.visible {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.model_selector.selected > 0 {
+                        self.model_selector.selected -= 1;
+                        if self.model_selector.selected < self.model_selector.scroll {
+                            self.model_selector.scroll = self.model_selector.selected;
+                        }
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.model_selector.selected + 1 < self.model_selector.models.len() {
+                        self.model_selector.selected += 1;
+                        let max_visible = SELECTOR_MAX_VISIBLE
+                            .min(self.model_selector.models.len());
+                        if self.model_selector.selected
+                            >= self.model_selector.scroll + max_visible
+                        {
+                            self.model_selector.scroll =
+                                self.model_selector.selected - max_visible + 1;
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    let name =
+                        self.model_selector.models[self.model_selector.selected].clone();
+                    self.model_selector.visible = false;
+                    self.model_selector.scroll = 0;
+                    let cmd = format!("/model {name}");
+                    let _ = self.handle_command(&cmd).await;
+                }
+                KeyCode::Esc => {
+                    self.model_selector.visible = false;
+                    self.model_selector.scroll = 0;
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         // Global shortcuts take precedence
         match (key.modifiers, key.code) {
             (KeyModifiers::CONTROL, KeyCode::Char('c') | KeyCode::Char('C')) => {
@@ -308,6 +424,10 @@ impl<'a> App<'a> {
             }
             (KeyModifiers::CONTROL, KeyCode::Char('d') | KeyCode::Char('D')) => {
                 self.running = false;
+                return Ok(());
+            }
+            (KeyModifiers::CONTROL, KeyCode::Char('m') | KeyCode::Char('M')) => {
+                self.toggle_model_selector();
                 return Ok(());
             }
             (_, KeyCode::PageUp) => {
@@ -469,6 +589,15 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn toggle_model_selector(&mut self) {
+        if !self.model_selector.models.is_empty() {
+            self.model_selector.visible = !self.model_selector.visible;
+            if !self.model_selector.visible {
+                self.model_selector.scroll = 0;
+            }
+        }
+    }
+
     #[allow(clippy::unused_async)]
     async fn handle_command(&mut self, cmd: &str) -> color_eyre::Result<()> {
         let parts: Vec<&str> = cmd.splitn(2, ' ').collect();
@@ -537,6 +666,7 @@ impl<'a> App<'a> {
                      Shift+Enter     — insert newline\n\
                      ↑ / ↓           — navigate input history\n\
                      PgUp / PgDn     — scroll chat\n\
+                     Ctrl+M          — open model selector\n\
                      Ctrl+C          — cancel generation / quit"
                         .to_string(),
                 ));
@@ -644,6 +774,49 @@ fn render_confirm_overlay(frame: &mut Frame, area: Rect, tool_name: &str, args_s
                     .border_style(Style::default().fg(Color::Yellow)),
             )
             .alignment(Alignment::Left),
+        popup,
+    );
+}
+
+/// Renders a model selection popup over the chat area.
+fn render_model_selector(frame: &mut Frame, area: Rect, sel: &ModelSelector, current: &str) {
+    let count = sel.models.len();
+    let visible = SELECTOR_MAX_VISIBLE.min(count);
+    let width = area.width.min(44);
+    let height = visible as u16 + 2;
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + 1;
+    let popup = Rect::new(x, y, width, height);
+
+    let scroll = sel.scroll.min(count.saturating_sub(visible));
+    let mut lines: Vec<Line> = Vec::with_capacity(visible);
+    for i in scroll..scroll + visible {
+        let is_selected = i == sel.selected;
+        let is_current = sel.models[i] == current;
+        let prefix = if is_current { " ◉ " } else { " ○ " };
+        let style = if is_selected {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else if is_current {
+            Style::default().fg(Color::Magenta)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", prefix, sel.models[i]),
+            style,
+        )));
+    }
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Select model ")
+                    .title_alignment(Alignment::Center)
+                    .border_style(Style::default().fg(Color::Cyan)),
+            ),
         popup,
     );
 }

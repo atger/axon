@@ -8,6 +8,25 @@ use tokio_util::sync::CancellationToken;
 use super::{Backend, BackendError, InferOptions, StreamEvent};
 use crate::session::{Message, Role};
 
+/// Best-effort list of installed Ollama model names via `GET {url}/api/tags`.
+pub async fn list_available(url: &str) -> Vec<String> {
+    let endpoint = format!("{}/api/tags", url.trim_end_matches('/'));
+    let Ok(resp) = reqwest::get(&endpoint).await else {
+        return Vec::new();
+    };
+    let Ok(body) = resp.json::<Value>().await else {
+        return Vec::new();
+    };
+    body.get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub struct OllamaBackend {
     base_url: String,
     model: String,

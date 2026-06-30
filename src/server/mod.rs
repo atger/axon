@@ -42,7 +42,7 @@ pub async fn run_server(swarm: Arc<Swarm>, host: String, port: u16) -> Result<()
         .route("/api/teams/:id/agents", post(teams::create_def))
         .route("/api/agent-defs/:id", put(teams::update_def).delete(teams::delete_def))
         .route("/api/agent-defs/generate", post(teams::generate_def))
-        .route("/api/models", get(list_models))
+        .route("/api/models", get(list_models).post(set_model))
         .route("/api/tasks", get(tasks::list))
         .route("/api/tasks/history", get(tasks::history))
         .route("/api/tasks/:id", get(tasks::get).put(tasks::update))
@@ -136,8 +136,8 @@ async fn cancel_all(State(swarm): State<Arc<Swarm>>) -> StatusCode {
 }
 
 async fn list_models(State(swarm): State<Arc<Swarm>>) -> Json<serde_json::Value> {
-    let current = swarm.model().to_string();
-    let mut models = ollama_models(swarm.ollama_url()).await;
+    let current = swarm.model().await;
+    let mut models = crate::llm::ollama::list_available(swarm.ollama_url()).await;
     // Ensure the current model is always selectable, even if `/api/tags` failed.
     if !models.iter().any(|m| m == &current) {
         models.insert(0, current.clone());
@@ -145,23 +145,26 @@ async fn list_models(State(swarm): State<Arc<Swarm>>) -> Json<serde_json::Value>
     Json(json!({ "current": current, "models": models }))
 }
 
-/// Best-effort list of installed Ollama model names via `GET {url}/api/tags`.
-async fn ollama_models(url: &str) -> Vec<String> {
-    let endpoint = format!("{}/api/tags", url.trim_end_matches('/'));
-    let Ok(resp) = reqwest::get(&endpoint).await else {
-        return Vec::new();
-    };
-    let Ok(body) = resp.json::<serde_json::Value>().await else {
-        return Vec::new();
-    };
-    body.get("models")
-        .and_then(|m| m.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default()
+#[derive(Deserialize)]
+struct SetModelReq {
+    model: String,
+}
+
+async fn set_model(
+    State(swarm): State<Arc<Swarm>>,
+    Json(req): Json<SetModelReq>,
+) -> Response {
+    if req.model.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "model must not be empty").into_response();
+    }
+    match swarm.set_model(&req.model).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------

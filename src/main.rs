@@ -41,12 +41,17 @@ async fn main() -> color_eyre::Result<()> {
         }
     }
 
-    // Resolve effective values: CLI flag → config → hardcoded default.
+    // Resolve effective values: CLI flag → config → platform default → ultimate fallback.
+    let default_model = match std::env::consts::OS {
+        "linux" => "qwen3.5:2b",
+        "macos" => "qwen3.5:4b-mlx",
+        _ => "qwen3.5:2b",
+    };
     let model = args
         .model
         .as_deref()
         .or(config.model.as_deref())
-        .unwrap_or("qwen3:4b")
+        .unwrap_or(default_model)
         .to_string();
     let backend_kind = args.backend.clone().unwrap_or(BackendKind::Local);
     let ollama_url = args
@@ -218,6 +223,14 @@ fn handle_model(cmd: &cli::ModelCmd, config: &mut AxonConfig) -> color_eyre::Res
         }
         cli::ModelAction::List => {
             println!("Built-in models:");
+            println!("  qwen3.5:2b   32768 ctx  ~1.3 GB");
+            println!("    repo: unsloth/Qwen3.5-2B-GGUF");
+            println!("    file: Qwen3.5-2B-Q4_K_M.gguf");
+            println!();
+            println!("  qwen3.5:4b-mlx   32768 ctx  ~2.7 GB  (recommended on macOS)");
+            println!("    repo: unsloth/Qwen3.5-4B-GGUF");
+            println!("    file: Qwen3.5-4B-Q4_K_M.gguf");
+            println!();
             println!("  qwen3:4b   32768 ctx  ~2.5 GB");
             println!("    repo: unsloth/Qwen3-4B-GGUF");
             println!("    file: Qwen3-4B-Q4_K_M.gguf");

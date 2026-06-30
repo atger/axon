@@ -61,6 +61,8 @@ pub struct AgentDef {
       #[serde(default)]
     pub task: Option<String>,
       #[serde(default)]
+    pub task_hint: Option<String>,
+      #[serde(default)]
     pub builtin: bool,
 }
 
@@ -253,6 +255,16 @@ pub async fn update_task(id: &str, title: &str, body: &str) -> Result<(), String
          .send()
          .await
          .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn set_model(name: &str) -> Result<(), String> {
+    Request::post("/api/models")
+        .json(&serde_json::json!({ "model": name }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

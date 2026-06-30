@@ -44,6 +44,10 @@ struct State {
     teams: RwSignal<Vec<TeamWithAgents>>,
     models: RwSignal<Vec<String>>,
     editing_def: RwSignal<bool>,
+    ed_md: RwSignal<String>,
+    ed_def: RwSignal<Option<AgentDef>>,
+    raw_mode_def: RwSignal<bool>,
+    spawn_task: RwSignal<String>,
 }
 
 impl State {
@@ -97,6 +101,10 @@ pub fn App() -> impl IntoView {
         teams: RwSignal::new(Vec::new()),
         models: RwSignal::new(Vec::new()),
         editing_def: RwSignal::new(false),
+        ed_md: RwSignal::new(String::new()),
+        ed_def: RwSignal::new(None),
+        raw_mode_def: RwSignal::new(false),
+        spawn_task: RwSignal::new(String::new()),
     };
 
     spawn_local(async move {
@@ -127,9 +135,28 @@ pub fn App() -> impl IntoView {
                     on:click=move |_| { state.tab.set(ViewTab::Tasks); state.refresh_tasks(); }>
                     "TO DO"</button>
                 <button class:active=move || state.tab.get() == ViewTab::Agents
-                    on:click=move |_| state.tab.set(ViewTab::Agents)>"Agents"</button>
+                    on:click=move |_| { state.tab.set(ViewTab::Agents); state.editing_def.set(false); state.selected.set(None); }>"Agents"</button>
             </nav>
-            <span class="model">"model: " {move || state.model.get()}</span>
+            <select class="model-select"
+                on:change=move |ev| {
+                    let name = event_target_value(&ev);
+                    if !name.is_empty() {
+                        let st = state;
+                        spawn_local(async move {
+                            let _ = api::set_model(&name).await;
+                            st.model.set(name);
+                        });
+                    }
+                }
+                prop:value=move || state.model.get()>
+                <option value="" disabled>"— select model —"</option>
+                {move || state.models.get().into_iter().map(|m| {
+                    let is_current = m == state.model.get();
+                    view! {
+                        <option value=m.clone() selected=is_current>{m.clone()}</option>
+                    }
+                }).collect_view()}
+            </select>
             <span class="spacer"></span>
             <span id="conn" class="model">"● live"</span>
         </header>
@@ -145,44 +172,47 @@ pub fn App() -> impl IntoView {
 // --------------------------------------------------------------------------
 
 fn agents_view(state: State) -> impl IntoView {
-    let ed_md = RwSignal::new(String::new());
-    let ed_def = RwSignal::new(Option::<AgentDef>::None);
-    let raw_mode = RwSignal::new(false);
-    let show_spawn = RwSignal::new(false);
-    let spawn_task = RwSignal::new(String::new());
-    let show_new_chat = RwSignal::new(false);
-    let new_chat_prompt = RwSignal::new(String::new());
-    let generating = RwSignal::new(false);
+    let spawn_input: NodeRef<leptos::html::Textarea> = NodeRef::new();
 
     let open_def = move |d: AgentDef| {
-        ed_md.set(agent_def_to_md(&d));
-        ed_def.set(Some(d));
-        raw_mode.set(false);
-        show_spawn.set(false);
-        spawn_task.set(String::new());
+        leptos::logging::log!("open_def called for: {}", d.name);
+        state.ed_md.set(agent_def_to_md(&d));
+        state.ed_def.set(Some(d));
+        state.raw_mode_def.set(false);
+        state.spawn_task.set(String::new());
         state.editing_def.set(true);
         state.selected.set(None);
-        show_new_chat.set(false);
+        leptos::logging::log!("editing_def now: {}", state.editing_def.get());
     };
 
-    let save = move |_| {
-        let def = ed_def.get().unwrap_or_else(|| blank_def("custom".to_string()));
-        let updated = md_to_agent_def(&ed_md.get(), &def);
-        let id = if updated.id.is_empty() { None } else { Some(updated.id.clone()) };
+    let save = move || {
+        let def = state.ed_def.get().unwrap_or_else(|| blank_def("custom".to_string()));
+        let updated = md_to_agent_def(&state.ed_md.get(), &def);
+        let id = if updated.id.is_empty() {
+            None
+        } else {
+            Some(updated.id.clone())
+        };
         let team = updated.team_id.clone();
-        raw_mode.set(false);
+        state.raw_mode_def.set(false);
         spawn_local(async move {
             let _ = match id {
                 Some(id) => api::update_def(&id, &updated).await,
                 None => api::create_def(&team, &updated).await,
             };
             state.teams.set(api::fetch_teams().await);
-            state.editing_def.set(false);
+            if state.editing_def.get() {
+                state.ed_def.set(Some(updated));
+            } else {
+                state.editing_def.set(false);
+            }
         });
     };
 
     let del = move |_| {
-        let id = ed_def.get().and_then(|d| if d.id.is_empty() { None } else { Some(d.id.clone()) });
+        let id = state.ed_def
+            .get()
+            .and_then(|d| if d.id.is_empty() { None } else { Some(d.id.clone()) });
         if let Some(id) = id {
             state.editing_def.set(false);
             spawn_local(async move {
@@ -193,13 +223,15 @@ fn agents_view(state: State) -> impl IntoView {
     };
 
     let do_spawn = move |_| {
-        let task = spawn_task.get().trim().to_string();
+        let task = state.spawn_task.get().trim().to_string();
         if task.is_empty() { return; }
-        if let Some(def) = ed_def.get() {
+        if let Some(def) = state.ed_def.get() {
             if !def.id.is_empty() {
                 let id = def.id.clone();
-                spawn_task.set(String::new());
-                show_spawn.set(false);
+                if let Some(el) = spawn_input.get() {
+                    let _ = el.set_value("");
+                }
+                state.editing_def.set(false);
                 spawn_local(async move {
                     let _ = api::spawn_agent(id, task).await;
                     state.agents.set(api::fetch_agents().await);
@@ -211,16 +243,12 @@ fn agents_view(state: State) -> impl IntoView {
     view! {
         <main>
             <div class="left">
-                <div class="row" style="margin-bottom:8px">
-                    <h3 class="section" style="margin:0">"DEFINITIONS"</h3>
+                <div class="row" style="margin:0 0 8px">
+                    <h3 class="section" style="margin:0">"AGENTS"</h3>
                     <span class="spacer"></span>
-                    <button on:click=move |_| {
-                        show_new_chat.set(true);
-                        new_chat_prompt.set(String::new());
-                        generating.set(false);
-                        state.editing_def.set(false);
-                        state.selected.set(None);
-                    }>"+ New"</button>
+                    <button class="danger"
+                        on:click=move |_| spawn_local(async { api::cancel_all().await; })>
+                        "cancel all"</button>
                 </div>
                 <div class="agents">
                     {move || {
@@ -237,10 +265,14 @@ fn agents_view(state: State) -> impl IntoView {
                             items.into_iter().map(|(team_name, a)| {
                                 let aid = a.id.clone();
                                 let is_sel = move || state.editing_def.get()
-                                    && ed_def.get().as_ref().map(|d| d.id == aid).unwrap_or(false);
+                                    && state.ed_def.get().as_ref().map(|d| d.id == aid).unwrap_or(false);
                                 let ac = a.clone();
                                 let a_clone = a.clone();
                                 let tn = team_name.clone();
+                                let active_count = {
+                                    let name = a.name.clone();
+                                    move || state.agents.get().iter().filter(|ag| ag.def_name.as_deref() == Some(&name)).count()
+                                };
                                 view! {
                                     <div class=move || if is_sel() { "agent sel" } else { "agent" }
                                         on:click=move |_| open_def(a_clone.clone())>
@@ -248,6 +280,9 @@ fn agents_view(state: State) -> impl IntoView {
                                             <span class="badge sys">{tn.clone()}</span>
                                             <span class="id">{ac.name.clone()}</span>
                                             {ac.schedule_mins.map(|m| view! { <span class="badge sys">{format!("⏲ {m}m")}</span> })}
+                                            {move || (active_count() > 0).then(|| view! {
+                                                <span class="badge running">{"● ".to_string() + &active_count().to_string()}</span>
+                                            })}
                                             <span class="spacer"></span>
                                             <span class="badge">{ac.model.clone().unwrap_or_else(|| "default".to_string())}</span>
                                         </div>
@@ -258,135 +293,116 @@ fn agents_view(state: State) -> impl IntoView {
                         }
                     }}
                 </div>
-                <div class="row" style="margin:14px 0 8px">
-                    <h3 class="section" style="margin:0">"AGENTS"</h3>
-                    <span class="spacer"></span>
-                    <button class="danger" on:click=move |_| spawn_local(async { api::cancel_all().await; })>
-                        "cancel all"</button>
-                </div>
-                <div class="agents">
-                    {move || {
-                        let ags = state.agents.get();
-                        if ags.is_empty() {
-                            view! { <div class="empty">"none running"</div> }.into_any()
-                        } else {
-                            ags.into_iter().map(|a| agent_card(state, a)).collect_view().into_any()
-                        }
-                    }}
-                </div>
             </div>
             <div class="right">
                 {move || {
-                    if show_new_chat.get() && !state.editing_def.get() {
-                        let is_gen = generating.get();
-                        let prompt_val = new_chat_prompt.get();
+                    leptos::logging::log!("right panel: selected={:?}, editing_def={}, raw_mode_def={}, ed_def={:?}",
+                        state.selected.get(), state.editing_def.get(), state.raw_mode_def.get(),
+                        state.ed_def.get().map(|d| d.name));
+                    if state.selected.get().is_some() {
                         view! {
-                            <div>
-                                <div class="row" style="margin-bottom:8px">
-                                    <h3 style="margin:0">"Create a new agent"</h3>
-                                    <span class="spacer"></span>
-                                    <button on:click=move |_| { show_new_chat.set(false); }>"Cancel"</button>
+                            <div class="split">
+                                <div class="split-top">
+                                    <button on:click=move |_| state.selected.set(None)>"← Back"</button>
+                                    {active_agents_graph(state)}
                                 </div>
-                                <div class="field">
-                                    <label>"Describe the agent you want to build"</label>
-                                    <textarea
-                                        prop:value=move || new_chat_prompt.get()
-                                        on:input=move |e| new_chat_prompt.set(event_target_value(&e))
-                                        placeholder="e.g. I need an agent that reviews code for security vulnerabilities and suggests fixes..."
-                                        style="min-height:120px"
-                                    ></textarea>
+                                <div class="split-bottom">
+                                    <Detail state=state/>
                                 </div>
-                                <button
-                                    disabled=is_gen || prompt_val.trim().is_empty()
-                                    on:click=move |_| {
-                                        let p = new_chat_prompt.get_untracked().trim().to_string();
-                                        if p.is_empty() { return; }
-                                        generating.set(true);
-                                        spawn_local(async move {
-                                            match api::generate_def(&p).await {
-                                                Ok(md) => {
-                                                    let blank = blank_def("custom".to_string());
-                                                    let def = md_to_agent_def(&md, &blank);
-                                                    ed_md.set(md);
-                                                    ed_def.set(Some(def));
-                                                    raw_mode.set(true);
-                                                    show_new_chat.set(false);
-                                                    state.editing_def.set(true);
-                                                }
-                                                Err(e) => {
-                                                    web_sys::console::log_1(&format!("generate error: {e}").into());
-                                                }
-                                            }
-                                            generating.set(false);
-                                        });
-                                    }
-                                >
-                                    {move || if generating.get() { "Generating…" } else { "Generate" }}
-                                </button>
                             </div>
                         }.into_any()
                     } else if state.editing_def.get() {
-                        let ro = move || ed_def.get().map(|d| d.builtin).unwrap_or(false);
-                        view! {
-                            <div class="row" style="margin-bottom:8px">
-                                <h3 style="margin:0">
-                                    {move || {
-                                        let d = ed_def.get();
-                                        if d.as_ref().map(|d| !d.id.is_empty()).unwrap_or(false) {
-                                            d.as_ref().map(|d| d.name.as_str()).unwrap_or("agent").to_string()
-                                        } else { "New agent".to_string() }
-                                    }}
-                                </h3>
-                                <span class="spacer"></span>
-                                {move || ro().then(|| view! { <span class="badge sys">"read-only"</span> })}
-                                <button on:click=move |_| raw_mode.update(|r| *r = !*r)>
-                                    {move || if raw_mode.get() { "view" } else { "edit" }}</button>
-                            </div>
-                            {move || if raw_mode.get() {
-                                view! {
-                                    <textarea class="md-edit" prop:value=move || ed_md.get()
-                                        on:input=move |e| ed_md.set(event_target_value(&e))></textarea>
-                                    {move || (!ro()).then(|| view! {
-                                        <div class="row" style="margin-top:8px">
-                                            <button on:click=save>"Save"</button>
-                                            <button on:click=move |_| { raw_mode.set(false); state.editing_def.set(false); }>"Cancel"</button>
-                                        </div>
-                                    })}
-                                }.into_any()
-                            } else {
-                                view! {
-                                    <div class="md-preview" inner_html=move || render_agent_md(&ed_md.get())></div>
-                                    {move || (!ro()).then(|| view! {
-                                        <div class="spawn-section">
-                                            <div class="row">
-                                                <button on:click=move |_| raw_mode.set(true)>"Edit"</button>
-                                                <button on:click=move |_| show_spawn.update(|s| *s = !*s)>
-                                                    {move || if show_spawn.get() { "Cancel spawn" } else { "Spawn with task…" }}</button>
-                                                {move || ed_def.get().map(|d| !d.id.is_empty()).unwrap_or(false).then(|| view! {
-                                                    <button class="danger" on:click=del>"Delete"</button>
-                                                })}
-                                            </div>
-                                            {move || show_spawn.get().then(|| view! {
-                                                <div class="field" style="margin-top:8px">
-                                                    <textarea prop:value=move || spawn_task.get()
-                                                        on:input=move |e| spawn_task.set(event_target_value(&e))
-                                                        placeholder="Describe a task for this agent…"></textarea>
-                                                    <button style="margin-top:4px" on:click=do_spawn>"Launch"</button>
-                                                </div>
+                        let ro = state.ed_def.get().map(|d| d.builtin).unwrap_or(false);
+                        let name = state.ed_def.get().as_ref().map(|d| d.name.as_str()).unwrap_or("agent").to_string();
+                        if state.raw_mode_def.get() {
+                            view! {
+                                <div class="row" style="margin-bottom:8px">
+                                    <h3 style="margin:0">{name.clone()}</h3>
+                                    <span class="spacer"></span>
+                                    {ro.then(|| view! { <span class="badge sys">"read-only"</span> })}
+                                    <button on:click=move |_| state.raw_mode_def.set(false)>"view"</button>
+                                    <button on:click=move |_| { state.editing_def.set(false); }>"Close"</button>
+                                </div>
+                                <textarea class="md-edit" prop:value=move || state.ed_md.get()
+                                    on:input=move |e| state.ed_md.set(event_target_value(&e))></textarea>
+                                {(!ro).then(|| view! {
+                                    <div class="row" style="margin-top:8px">
+                                        <button on:click=move |_| { save(); }>"Save"</button>
+                                        <button on:click=move |_| { state.raw_mode_def.set(false); state.editing_def.set(false); }>"Cancel"</button>
+                                    </div>
+                                })}
+                            }.into_any()
+                        } else {
+                            view! {
+                                <div class="row" style="margin-bottom:8px">
+                                    <h3 style="margin:0">{name.clone()}</h3>
+                                    <span class="spacer"></span>
+                                    {ro.then(|| view! { <span class="badge sys">"read-only"</span> })}
+                                    <button on:click=move |_| state.raw_mode_def.set(true)>"edit"</button>
+                                    <button on:click=move |_| { state.editing_def.set(false); }>"Close"</button>
+                                </div>
+                                <div class="md-preview" style="height:calc(100vh - 230px)" inner_html=move || render_agent_md(&state.ed_md.get())></div>
+                                <div class="spawn-section">
+                                    {(!ro).then(|| view! {
+                                        <div class="row">
+                                            <button on:click=move |_| state.raw_mode_def.set(true)>"Edit YAML"</button>
+                                            {state.ed_def.get().map(|d| !d.id.is_empty()).unwrap_or(false).then(|| view! {
+                                                <button class="danger" on:click=del>"Delete"</button>
                                             })}
                                         </div>
                                     })}
-                                }.into_any()
-                            }}
-                        }.into_any()
-                    } else if state.selected.get().is_some() {
-                        view! { <Detail state=state/> }.into_any()
+                                    <div class="field" style="margin-top:8px">
+                                        <textarea node_ref=spawn_input
+                                            on:input=move |e| state.spawn_task.set(event_target_value(&e))
+                                            placeholder=move || state.ed_def.get().and_then(|d| d.task_hint.clone()).unwrap_or_else(|| "Describe a task for this agent…".to_string())></textarea>
+                                        <button style="margin-top:4px" on:click=do_spawn>"Spawn"</button>
+                                    </div>
+                                </div>
+                            }.into_any()
+                        }
                     } else {
-                        view! { <h3 class="muted">"select a definition or running agent"</h3> }.into_any()
+                        active_agents_graph(state).into_any()
                     }
                 }}
             </div>
         </main>
+    }
+}
+
+fn active_agents_graph(state: State) -> impl IntoView {
+    view! {
+        <svg class="graph-svg" viewBox="0 0 340 340">
+            {move || {
+                let ags = state.agents.get();
+                let n = ags.len();
+                if n == 0 {
+                    return view! { <text x="170" y="170" text-anchor="middle" fill="var(--muted)" font-size="14">"no active agents"</text> }.into_any();
+                }
+                let (cx, cy, r) = (170.0f64, 170.0f64, 130.0f64);
+                ags.into_iter().enumerate().map(|(i, a)| {
+                    let angle = std::f64::consts::PI * 2.0 * (i as f64) / (n as f64) - std::f64::consts::PI / 2.0;
+                    let x = cx + r * angle.cos();
+                    let y = cy + r * angle.sin();
+                    let label = if a.id.len() > 12 { format!("{}…", &a.id[..12]) } else { a.id.clone() };
+                    let fill = match a.status.as_str() {
+                        "running" => "var(--accent)",
+                        "done" => "var(--green)",
+                        "error" => "var(--red)",
+                        "queued" => "var(--yellow)",
+                        "idle" => "#bc8cff",
+                        _ => "var(--muted)",
+                    };
+                    let id_sel = a.id.clone();
+                    let yt = y + 4.0;
+                    view! {
+                        <g on:click=move |_| { state.selected.set(Some(id_sel.clone())); state.editing_def.set(false); } style="cursor:pointer">
+                            <circle cx={x.to_string()} cy={y.to_string()} r="18" fill=fill opacity="0.3" stroke=fill stroke-width="3" />
+                            <text x={x.to_string()} y={yt.to_string()} text-anchor="middle" fill="var(--fg)" font-size="9" font-weight="bold">{label}</text>
+                        </g>
+                    }
+                }).collect_view().into_any()
+            }}
+        </svg>
     }
 }
 
@@ -410,33 +426,6 @@ fn Detail(state: State) -> impl IntoView {
     }
 }
 
-fn agent_card(state: State, a: AgentInfo) -> impl IntoView {
-    let id_sel = a.id.clone();
-    let id_cancel = a.id.clone();
-    let selected = move || state.selected.get().as_deref() == Some(id_sel.as_str());
-    let system = a.perpetual;
-    let role = a.role.clone();
-    let label = a.def_name.clone().unwrap_or_else(|| a.model.clone());
-    view! {
-        <div class=move || if selected() { "agent sel" } else { "agent" }
-            on:click={ let id = a.id.clone(); move |_| { state.selected.set(Some(id.clone())); state.editing_def.set(false); } }>
-            <div class="row">
-                <span class="id">{a.id.clone()}</span>
-                {move || system.then(|| view! { <span class="badge sys">{role.clone()}</span> })}
-                {(!system).then(|| view! { <span class="badge">{label.clone()}</span> })}
-                <span class=format!("badge {}", a.status)>{a.status.clone()}</span>
-                <span class="spacer"></span>
-                <button on:click=move |e| {
-                    e.stop_propagation();
-                    let id = id_cancel.clone();
-                    spawn_local(async move { api::cancel_agent(id).await; });
-                }>"cancel"</button>
-            </div>
-            <div class="task">{a.task.clone()}</div>
-        </div>
-    }
-}
-
 // --------------------------------------------------------------------------
 // Teams view (configure reusable agents)
 // --------------------------------------------------------------------------
@@ -454,6 +443,7 @@ fn blank_def(team_id: String) -> AgentDef {
         max_turns: None,
         schedule_mins: None,
         task: None,
+        task_hint: None,
         builtin: false,
     }
 }
@@ -588,6 +578,7 @@ fn render_agent_md(md: &str) -> String {
     let mut tools = Vec::new();
     let mut schedule = String::new();
     let mut task = String::new();
+    let mut task_hint = String::new();
     let mut in_tools = false;
 
     for line in frontmatter.lines() {
@@ -644,6 +635,9 @@ fn render_agent_md(md: &str) -> String {
                 "task" if !v.is_empty() && v != "|" => {
                     task = v.to_string();
                 }
+                "task_hint" if !v.is_empty() => {
+                    task_hint = v.to_string();
+                }
                 _ => {}
             }
         }
@@ -657,6 +651,9 @@ fn render_agent_md(md: &str) -> String {
     }
     if !task.is_empty() {
         meta.push_str(&format!("<span class=\"meta-badge\">task: {}</span> ", task));
+    }
+    if !task_hint.is_empty() {
+        meta.push_str(&format!("<span class=\"meta-badge\">hint: {}</span> ", task_hint));
     }
 
     let mut html = String::from("<div class=\"agent-meta\">");
@@ -685,6 +682,7 @@ memory_window: 20  # conversation window
 max_turns: 10  # max turns before stopping
 schedule_mins:  # set to run on N-minute interval (blank = on-demand)
 task:  # recurring task description (if scheduled)
+task_hint:  # placeholder shown in the spawn task textarea (optional)
 ---
 
 # Agent instructions
@@ -721,6 +719,9 @@ Describe what this agent should do...
             fm.push_str(&format!("  {line}\n"));
         }
     }
+    if let Some(ref h) = def.task_hint {
+        fm.push_str(&format!("task_hint: {h}\n"));
+    }
     fm.push_str("---\n\n");
     fm.push_str(&def.instructions);
     fm
@@ -739,6 +740,7 @@ fn md_to_agent_def(md: &str, fallback: &AgentDef) -> AgentDef {
         max_turns: None,
         schedule_mins: None,
         task: None,
+        task_hint: None,
         builtin: fallback.builtin,
     };
 
@@ -822,6 +824,11 @@ fn md_to_agent_def(md: &str, fallback: &AgentDef) -> AgentDef {
                 "memory_window" => def.memory_window = v.parse().ok(),
                 "max_turns" => def.max_turns = v.parse().ok(),
                 "schedule_mins" => def.schedule_mins = v.parse().ok(),
+                "task_hint" => {
+                    if !v.is_empty() {
+                        def.task_hint = Some(v.to_string());
+                    }
+                }
                 "task" => {
                     if v == "|" {
                         in_task = true;
@@ -864,6 +871,13 @@ fn handle_event(state: State, ev: SwarmEvent) {
                 }
             }
             "TasksChanged" => state.refresh_tasks(),
+            "ModelChanged" => {
+                let st = state;
+                spawn_local(async move {
+                    st.model.set(api::fetch_model().await);
+                    st.models.set(api::fetch_models().await);
+                });
+            }
             _ => {}
         }
         return;

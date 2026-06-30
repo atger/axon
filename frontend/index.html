@@ -12,7 +12,8 @@
   body { margin:0; font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--bg); color:var(--fg); }
   header { display:flex; align-items:center; gap:16px; padding:10px 16px; border-bottom:1px solid var(--border); background:var(--panel); }
   header h1 { font-size:16px; margin:0; color:var(--accent); }
-  header .model { color:var(--muted); }
+  header .model-select { min-width:160px; max-width:260px; color:var(--fg); background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:4px 8px; font:inherit; cursor:pointer; }
+  header .model-select:hover { border-color:var(--accent); }
   .spacer { flex:1; }
   button { background:#21262d; color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:6px 12px; cursor:pointer; font:inherit; }
   button:hover { border-color:var(--accent); }
@@ -57,6 +58,10 @@
   .log .ev-tool { color:var(--yellow); } .log .ev-done { color:var(--green); }
   .log .ev-error { color:var(--red); } .log .ev-turn { color:var(--muted); }
   .empty { color:var(--muted); }
+  .split { display:flex; flex-direction:column; height:calc(100vh - 85px); }
+  .split-top { flex:1; overflow:hidden; }
+  .split-bottom { flex:1; overflow-y:auto; border-top:1px solid var(--border); padding-top:12px; margin-top:8px; }
+  .spawn-section { margin-top:8px; padding-top:12px; border-top:1px solid var(--border); }
 </style>
 </head>
 <body></body>

@@ -415,6 +415,16 @@ pub(crate) fn resolve_model(name: &str) -> (String, String, usize) {
         );
     }
     match name {
+        "qwen3.5:2b" => (
+            "unsloth/Qwen3.5-2B-GGUF".into(),
+            "Qwen3.5-2B-Q4_K_M.gguf".into(),
+            32768,
+        ),
+        "qwen3.5:4b-mlx" | "qwen3.5-4b" => (
+            "unsloth/Qwen3.5-4B-GGUF".into(),
+            "Qwen3.5-4B-Q4_K_M.gguf".into(),
+            32768,
+        ),
         "qwen3-4b-q4_k_m" | "qwen3:4b" | "qwen3-4b" => (
             "unsloth/Qwen3-4B-GGUF".into(),
             "Qwen3-4B-Q4_K_M.gguf".into(),
@@ -428,4 +438,9 @@ pub(crate) fn resolve_model(name: &str) -> (String, String, usize) {
             }
         }
     }
+}
+
+/// Returns the list of built-in model names.
+pub fn known_models() -> Vec<&'static str> {
+    vec!["qwen3.5:2b", "qwen3.5:4b-mlx", "qwen3:4b"]
 }
