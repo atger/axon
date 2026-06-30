@@ -304,7 +304,7 @@ fn agents_view(state: State) -> impl IntoView {
                             <div class="split">
                                 <div class="split-top">
                                     <button on:click=move |_| state.selected.set(None)>"← Back"</button>
-                                    {active_agents_graph(state)}
+                                    <TimelineView state=state />
                                 </div>
                                 <div class="split-bottom">
                                     <Detail state=state/>
@@ -361,7 +361,7 @@ fn agents_view(state: State) -> impl IntoView {
                             }.into_any()
                         }
                     } else {
-                        active_agents_graph(state).into_any()
+                        view! { <TimelineView state=state /> }.into_any()
                     }
                 }}
             </div>
@@ -369,40 +369,258 @@ fn agents_view(state: State) -> impl IntoView {
     }
 }
 
-fn active_agents_graph(state: State) -> impl IntoView {
-    view! {
-        <svg class="graph-svg" viewBox="0 0 340 340">
-            {move || {
-                let ags = state.agents.get();
-                let n = ags.len();
-                if n == 0 {
-                    return view! { <text x="170" y="170" text-anchor="middle" fill="var(--muted)" font-size="14">"no active agents"</text> }.into_any();
-                }
-                let (cx, cy, r) = (170.0f64, 170.0f64, 130.0f64);
-                ags.into_iter().enumerate().map(|(i, a)| {
-                    let angle = std::f64::consts::PI * 2.0 * (i as f64) / (n as f64) - std::f64::consts::PI / 2.0;
-                    let x = cx + r * angle.cos();
-                    let y = cy + r * angle.sin();
-                    let label = if a.id.len() > 12 { format!("{}…", &a.id[..12]) } else { a.id.clone() };
-                    let fill = match a.status.as_str() {
-                        "running" => "var(--accent)",
-                        "done" => "var(--green)",
-                        "error" => "var(--red)",
-                        "queued" => "var(--yellow)",
-                        "idle" => "#bc8cff",
-                        _ => "var(--muted)",
-                    };
-                    let id_sel = a.id.clone();
-                    let yt = y + 4.0;
-                    view! {
-                        <g on:click=move |_| { state.selected.set(Some(id_sel.clone())); state.editing_def.set(false); } style="cursor:pointer">
-                            <circle cx={x.to_string()} cy={y.to_string()} r="18" fill=fill opacity="0.3" stroke=fill stroke-width="3" />
-                            <text x={x.to_string()} y={yt.to_string()} text-anchor="middle" fill="var(--fg)" font-size="9" font-weight="bold">{label}</text>
-                        </g>
+#[component]
+fn TimelineView(state: State) -> impl IntoView {
+    const LX: f64 = 5.0;
+    const TX: f64 = 140.0;
+    const TW: f64 = 740.0;
+    const RH: f64 = 48.0;
+    const HH: f64 = 40.0;
+    const ZOOM_LEVELS: &[f64] = &[1200.0, 2400.0, 3600.0, 7200.0, 14400.0, 28800.0, 86400.0];
+
+    let zoom_idx = RwSignal::new(1i32);
+
+    let rows = move || -> Vec<(String, u64, Vec<api::AgentInfo>)> {
+        let agents = state.agents.get();
+        let teams = state.teams.get();
+        let mut def_map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+        for tw in &teams {
+            for def in &tw.agents {
+                if let Some(mins) = def.schedule_mins {
+                    if mins > 0 {
+                        def_map.insert(def.name.clone(), mins);
                     }
-                }).collect_view().into_any()
-            }}
-        </svg>
+                }
+            }
+        }
+        let mut groups: Vec<(String, u64, Vec<api::AgentInfo>)> = Vec::new();
+        for (name, mins) in &def_map {
+            let ags: Vec<api::AgentInfo> = agents.iter()
+                .filter(|a| a.def_name.as_deref() == Some(name.as_str()))
+                .cloned()
+                .collect();
+            groups.push((name.clone(), *mins, ags));
+        }
+        groups.sort_by(|a, b| a.0.cmp(&b.0));
+        groups
+    };
+
+    let nrows = move || rows().len();
+
+    let nonscheduled = move || {
+        let agents = state.agents.get();
+        let teams = state.teams.get();
+        let scheduled_names: std::collections::HashSet<String> = teams.iter()
+            .flat_map(|tw| &tw.agents)
+            .filter(|d| d.schedule_mins.unwrap_or(0) > 0)
+            .map(|d| d.name.clone())
+            .collect();
+        agents.iter().filter(|a| {
+            a.def_name.as_deref().map(|n| !scheduled_names.contains(n)).unwrap_or(true)
+        }).count()
+    };
+
+    let view_box = move || {
+        let n = nrows();
+        if n == 0 {
+            "0 0 900 200".to_string()
+        } else {
+            format!("0 0 900 {}", HH + n as f64 * RH + 30.0)
+        }
+    };
+
+    let zoom_max = ZOOM_LEVELS.len() as i32 - 1;
+    let zoom_out = move |_| { zoom_idx.update(|i| if *i < zoom_max { *i += 1 }) };
+    let zoom_in = move |_| { zoom_idx.update(|i| if *i > 0 { *i -= 1 }) };
+
+    view! {
+        <div class="timeline-wrap">
+            <div class="timeline-controls">
+                <button on:click=zoom_out>"−"</button>
+                <span class="zoom-label">{move || {
+                    let t = ZOOM_LEVELS[zoom_idx.get() as usize];
+                    if t < 3600.0 { format!("{}m", t / 60.0) }
+                    else if t < 86400.0 { format!("{}h", t / 3600.0) }
+                    else { format!("24h") }
+                }}</span>
+                <button on:click=zoom_in>"+"</button>
+            </div>
+            <svg class="timeline-svg" viewBox=view_box preserveAspectRatio="xMinYMin meet">
+                {move || {
+                    let now = js_sys::Date::now() / 1000.0;
+                    let n = nrows();
+                    let wt = ZOOM_LEVELS[zoom_idx.get() as usize];
+                    let wp = wt * 0.75;
+                    let wf = wt * 0.25;
+                    if n == 0 {
+                        return view! { <text x="450" y="100" text-anchor="middle" fill="var(--muted)" font-size="14">"no scheduled agents"</text> }.into_any();
+                    }
+                    let tx = TX;
+                    let tw = TW;
+                    let t2x = move |t_epoch: f64| -> f64 { tx + (t_epoch - (now - wp)) / wt * tw };
+
+                    // ── time axis ──
+                    let tick_int = move || -> f64 {
+                        if wt <= 1200.0 { 120.0 }
+                        else if wt <= 2400.0 { 300.0 }
+                        else if wt <= 3600.0 { 600.0 }
+                        else if wt <= 7200.0 { 900.0 }
+                        else if wt <= 14400.0 { 1800.0 }
+                        else if wt <= 28800.0 { 3600.0 }
+                        else { 10800.0 }
+                    };
+                    let ti = tick_int();
+                    let tick_count = ((wp + wf) / ti).ceil() as i32;
+                    let axis: Vec<_> = (0..=tick_count).filter_map(|i| {
+                        let offset_s = i as f64 * ti - wp;
+                        let x = t2x(now + offset_s);
+                        if x < tx || x > tx + tw { return None; }
+                        let label = if offset_s == 0.0 {
+                            "now".to_string()
+                        } else if wt <= 3600.0 {
+                            format!("{:+}m", (offset_s / 60.0) as i32)
+                        } else {
+                            format!("{:+}h", (offset_s / 3600.0) as i32)
+                        };
+                        Some(view! {
+                            <g>
+                                <text x={x.to_string()} y="16" text-anchor="middle" fill="var(--muted)" font-size="10">{label}</text>
+                                <line x1={x.to_string()} y1="22" x2={x.to_string()} y2="28" stroke="var(--border)" stroke-width="1" />
+                            </g>
+                        }.into_any())
+                    }).collect();
+
+                    // ── rows ──
+                    let row_views: Vec<_> = rows().into_iter().enumerate().map(|(i, (name, interval_mins, ags))| {
+                        let y = HH + i as f64 * RH;
+                        let y_center = y + RH / 2.0;
+                        let label = if name.len() > 18 { format!("{}…", &name[..18]) } else { name.clone() };
+                        let interval_s = interval_mins as f64 * 60.0;
+                        let primary = ags.first();
+                        let status = primary.map(|a| a.status.as_str()).unwrap_or("");
+                        let cs = primary.and_then(|a| {
+                            let s = a.cycle_started.as_str();
+                            if s.is_empty() { return None; }
+                            let js_val = wasm_bindgen::JsValue::from_str(s);
+                            let d = js_sys::Date::new(&js_val);
+                            let t = d.get_time() / 1000.0;
+                            if t.is_nan() || t <= 0.0 { None } else { Some(t) }
+                        });
+
+                        // Build cycle bars within the visible window
+                        let mut bars = Vec::new();
+                        let win_start = now - wp;
+                        let win_end = now + wf;
+
+                        if let Some(cs) = cs {
+                            let first_idx = ((win_start - cs) / interval_s).ceil() as i32;
+                            let last_idx = ((win_end - cs) / interval_s).floor() as i32;
+                            for idx in first_idx..=last_idx {
+                                let cycle_t = cs + idx as f64 * interval_s;
+                                let is_current = idx == 0 && cycle_t <= now && cycle_t + interval_s > now;
+                                let is_past = cycle_t + interval_s <= now;
+                                let (bar_start, bar_end, cls) = if is_current {
+                                    let end = match status {
+                                        "running" | "queued" => now,
+                                        "idle" => cycle_t + interval_s * 0.15,
+                                        _ => now,
+                                    };
+                                    (cycle_t, end, if status == "idle" { "done" } else { "running" })
+                                } else if is_past {
+                                    (cycle_t, cycle_t + interval_s * 0.1, "done")
+                                } else {
+                                    (cycle_t, cycle_t + interval_s * 0.1, "future")
+                                };
+                                let x1 = t2x(bar_start.max(win_start)).max(tx);
+                                let x2 = t2x(bar_end.min(win_end)).min(tx + tw);
+                                let w = (x2 - x1).max(2.0);
+                                if w < 1.0 { continue; }
+                                let bar_y = y_center - 8.0;
+                                let bar_h = 16.0;
+                                let rect = match cls {
+                                    "future" => view! {
+                                        <rect x={x1.to_string()} y={bar_y.to_string()} width={w.to_string()} height={bar_h.to_string()} rx="4"
+                                            fill="var(--accent)" opacity="0.15" stroke="var(--accent)" stroke-width="1" stroke-dasharray="3,3" />
+                                    }.into_any(),
+                                    "running" => view! {
+                                        <rect x={x1.to_string()} y={bar_y.to_string()} width={w.to_string()} height={bar_h.to_string()} rx="4"
+                                            fill="var(--accent)" opacity="0.7" />
+                                    }.into_any(),
+                                    _ => view! {
+                                        <rect x={x1.to_string()} y={bar_y.to_string()} width={w.to_string()} height={bar_h.to_string()} rx="4"
+                                            fill="var(--green)" opacity="0.5" />
+                                    }.into_any(),
+                                };
+                                bars.push(rect);
+                            }
+                        } else if !ags.is_empty() {
+                            let x1 = tx;
+                            let x2 = t2x(now);
+                            bars.push(view! {
+                                <rect x={x1.to_string()} y={(y_center - 8.0).to_string()} width={(x2 - x1).max(8.0).to_string()} height="16" rx="4"
+                                    fill="var(--accent)" opacity="0.5" />
+                            }.into_any());
+                        } else {
+                            bars.push(view! {
+                                <rect x={tx.to_string()} y={(y_center - 8.0).to_string()} width={tw.to_string()} height="16" rx="4"
+                                    fill="none" stroke="var(--muted)" stroke-width="1" stroke-dasharray="3,3" opacity="0.3" />
+                            }.into_any());
+                        };
+
+                        let aid = ags.first().map(|a| a.id.clone());
+                        let click_rect = aid.map(|id| {
+                            let id_sel = id.clone();
+                            view! {
+                                <rect x="0" y={y.to_string()} width="900" height={RH.to_string()} fill="transparent"
+                                    on:click=move |_| { state.selected.set(Some(id_sel.clone())); state.editing_def.set(false); }
+                                    style="cursor:pointer" />
+                            }.into_any()
+                        });
+
+                        view! {
+                            <g>
+                                <text x={LX.to_string()} y={(y_center + 4.0).to_string()} fill="var(--fg)" font-size="12" font-weight="bold">{label}</text>
+                                <text x={(LX + 4.0).to_string()} y={(y_center + 18.0).to_string()} fill="var(--muted)" font-size="9">{format!("⏲ {}m", interval_mins)}</text>
+                                {(!ags.is_empty()).then(|| view! {
+                                    <text x={(LX + 4.0).to_string()} y={(y_center + 30.0).to_string()} fill="var(--accent)" font-size="9">{format!("● {}", ags.len())}</text>
+                                })}
+                                <line x1={tx.to_string()} y1={y_center.to_string()} x2={(tx + tw).to_string()} y2={y_center.to_string()} stroke="var(--border)" stroke-width="1" opacity="0.3" />
+                                {bars.into_iter().collect_view()}
+                                {click_rect}
+                            </g>
+                        }.into_any()
+                    }).collect();
+
+                    // ── now line ──
+                    let now_x = t2x(now);
+                    let footer_y = HH + n as f64 * RH + 4.0;
+                    let ns = nonscheduled();
+                    let groups: Vec<_> = std::iter::once(
+                        view! { <line x1="0" y1={HH.to_string()} x2="900" y2={HH.to_string()} stroke="var(--border)" stroke-width="1" /> }.into_any()
+                    ).chain(
+                        axis.into_iter()
+                    ).chain(
+                        row_views.into_iter()
+                    ).chain(
+                        std::iter::once(
+                            view! {
+                                <line x1={now_x.to_string()} y1={HH.to_string()} x2={now_x.to_string()} y2={(HH + n as f64 * RH).to_string()}
+                                    stroke="var(--red)" stroke-width="2" stroke-dasharray="4,4" opacity="0.8" />
+                            }.into_any()
+                        )
+                    ).chain(
+                        std::iter::once(
+                            view! {
+                                <text x={TX.to_string()} y={footer_y.to_string()} fill="var(--muted)" font-size="11">
+                                    {if ns > 0 { format!("{ns} on-demand agent(s) running") } else { String::new() }}
+                                </text>
+                            }.into_any()
+                        )
+                    ).collect();
+                    groups.into_iter().collect_view().into_any()
+                }}
+            </svg>
+        </div>
     }
 }
 

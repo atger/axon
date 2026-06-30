@@ -63,6 +63,10 @@ pub struct AgentInfo {
     /// ISO-8601 timestamp when the agent was started.
     #[serde(default)]
     pub started: String,
+    /// ISO-8601 timestamp when the current cycle started (for scheduled/perpetual
+    /// agents); updated each time a new task is published.
+    #[serde(default)]
+    pub cycle_started: String,
 }
 
 struct AgentEntry {
@@ -229,6 +233,10 @@ impl Swarm {
         self.agents.read().await.get(id).map(|e| e.info.clone())
     }
 
+    pub async fn history(&self) -> Vec<HistoricAgent> {
+        self.agent_history.lock().await.iter().cloned().collect()
+    }
+
     pub async fn model(&self) -> String {
         self.model.read().await.clone()
     }
@@ -270,7 +278,8 @@ impl Swarm {
             role: spec.role,
             perpetual: spec.perpetual,
             def_name: spec.def_name,
-            started: now,
+            started: now.clone(),
+            cycle_started: now,
         };
         self.agents
             .write()
@@ -304,6 +313,7 @@ impl Swarm {
         if let Some(e) = self.agents.write().await.get_mut(id) {
             e.info.task = task_text;
             e.info.status = AgentStatus::Queued;
+            e.info.cycle_started = chrono::Local::now().to_rfc3339();
             eprintln!("[swarm] publish_to: found agent, set status=Queued");
         } else {
             eprintln!("[swarm] publish_to: agent {id} NOT found in agents map");

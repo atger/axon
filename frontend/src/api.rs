@@ -20,6 +20,8 @@ pub struct AgentInfo {
     pub perpetual: bool,
      #[serde(default)]
     pub def_name: Option<String>,
+     #[serde(default)]
+    pub cycle_started: String,
      // Lifecycle tracking fields
      #[serde(default)]
     pub last_seen_stage: String,
@@ -70,6 +72,20 @@ fn default_policy() -> String {
       "auto_approve".to_string()
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct HistoricAgent {
+    pub id: String,
+    pub task: String,
+    pub model: String,
+    pub status: String,
+    #[serde(default)]
+    pub def_name: Option<String>,
+    pub started: String,
+    pub completed: String,
+    #[serde(default)]
+    pub result: Option<String>,
+}
+
 /// Mirrors `crate::swarm::teams::TeamWithAgents`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct TeamWithAgents {
@@ -117,6 +133,13 @@ struct SpawnReq {
 
 pub async fn fetch_agents() -> Vec<AgentInfo> {
     match Request::get("/api/agents").send().await {
+        Ok(resp) => resp.json().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+     }
+}
+
+pub async fn fetch_agent_history() -> Vec<HistoricAgent> {
+    match Request::get("/api/agents/history").send().await {
         Ok(resp) => resp.json().await.unwrap_or_default(),
         Err(_) => Vec::new(),
      }

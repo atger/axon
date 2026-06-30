@@ -35,6 +35,7 @@ struct Assets;
 pub async fn run_server(swarm: Arc<Swarm>, host: String, port: u16) -> Result<()> {
     let app = Router::new()
         .route("/api/agents", get(list_agents).post(spawn_agent))
+        .route("/api/agents/history", get(list_agent_history))
         .route("/api/agents/cancel-all", post(cancel_all))
         .route("/api/agents/:id", get(get_agent).delete(cancel_agent))
         .route("/api/teams", get(teams::list).post(teams::create))
@@ -79,6 +80,10 @@ pub async fn run_server(swarm: Arc<Swarm>, host: String, port: u16) -> Result<()
 
 async fn list_agents(State(swarm): State<Arc<Swarm>>) -> Json<serde_json::Value> {
     Json(json!(swarm.list().await))
+}
+
+async fn list_agent_history(State(swarm): State<Arc<Swarm>>) -> Json<serde_json::Value> {
+    Json(json!(swarm.history().await))
 }
 
 #[derive(Deserialize)]
