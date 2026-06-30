@@ -394,14 +394,19 @@ fn TimelineView(state: State) -> impl IntoView {
             }
         }
         let mut groups: Vec<(String, u64, Vec<api::AgentInfo>)> = Vec::new();
-        for (name, mins) in &def_map {
-            let ags: Vec<api::AgentInfo> = agents.iter()
-                .filter(|a| a.def_name.as_deref() == Some(name.as_str()))
-                .cloned()
-                .collect();
-            groups.push((name.clone(), *mins, ags));
+        for agent in agents.iter() {
+            if let Some(def_name) = &agent.def_name {
+                if let Some(&mins) = def_map.get(def_name.as_str()) {
+                    let short = if agent.id.len() > 6 { &agent.id[..6] } else { &agent.id };
+                    groups.push((format!("{} ({})", def_name, short), mins, vec![agent.clone()]));
+                }
+            }
         }
-        groups.sort_by(|a, b| a.0.cmp(&b.0));
+        groups.sort_by(|a, b| {
+            let a_def = a.0.split(" (").next().unwrap_or(&a.0);
+            let b_def = b.0.split(" (").next().unwrap_or(&b.0);
+            a_def.cmp(&b_def).then_with(|| a.0.cmp(&b.0))
+        });
         groups
     };
 
@@ -517,17 +522,15 @@ fn TimelineView(state: State) -> impl IntoView {
                             let last_idx = ((win_end - cs) / interval_s).floor() as i32;
                             for idx in first_idx..=last_idx {
                                 let cycle_t = cs + idx as f64 * interval_s;
-                                let is_current = idx == 0 && cycle_t <= now && cycle_t + interval_s > now;
+                                let is_current = cycle_t <= now && cycle_t + interval_s > now;
                                 let is_past = cycle_t + interval_s <= now;
+                                if is_past { continue; }
                                 let (bar_start, bar_end, cls) = if is_current {
-                                    let end = match status {
-                                        "running" | "queued" => now,
-                                        "idle" => cycle_t + interval_s * 0.15,
-                                        _ => now,
-                                    };
-                                    (cycle_t, end, if status == "idle" { "done" } else { "running" })
-                                } else if is_past {
-                                    (cycle_t, cycle_t + interval_s * 0.1, "done")
+                                    match status {
+                                        "idle" | "done" => (cycle_t, cycle_t + interval_s * 0.15, "done"),
+                                        "error" => (cycle_t, cycle_t + interval_s * 0.15, "error"),
+                                        _ => (cycle_t, now, "running"),
+                                    }
                                 } else {
                                     (cycle_t, cycle_t + interval_s * 0.1, "future")
                                 };
@@ -545,6 +548,10 @@ fn TimelineView(state: State) -> impl IntoView {
                                     "running" => view! {
                                         <rect x={x1.to_string()} y={bar_y.to_string()} width={w.to_string()} height={bar_h.to_string()} rx="4"
                                             fill="var(--accent)" opacity="0.7" />
+                                    }.into_any(),
+                                    "error" => view! {
+                                        <rect x={x1.to_string()} y={bar_y.to_string()} width={w.to_string()} height={bar_h.to_string()} rx="4"
+                                            fill="var(--red)" opacity="0.7" />
                                     }.into_any(),
                                     _ => view! {
                                         <rect x={x1.to_string()} y={bar_y.to_string()} width={w.to_string()} height={bar_h.to_string()} rx="4"
@@ -581,8 +588,8 @@ fn TimelineView(state: State) -> impl IntoView {
                             <g>
                                 <text x={LX.to_string()} y={(y_center + 4.0).to_string()} fill="var(--fg)" font-size="12" font-weight="bold">{label}</text>
                                 <text x={(LX + 4.0).to_string()} y={(y_center + 18.0).to_string()} fill="var(--muted)" font-size="9">{format!("⏲ {}m", interval_mins)}</text>
-                                {(!ags.is_empty()).then(|| view! {
-                                    <text x={(LX + 4.0).to_string()} y={(y_center + 30.0).to_string()} fill="var(--accent)" font-size="9">{format!("● {}", ags.len())}</text>
+                                {ags.first().map(|a| view! {
+                                    <text x={(LX + 4.0).to_string()} y={(y_center + 30.0).to_string()} fill="var(--muted)" font-size="9">{a.id.clone()}</text>
                                 })}
                                 <line x1={tx.to_string()} y1={y_center.to_string()} x2={(tx + tw).to_string()} y2={y_center.to_string()} stroke="var(--border)" stroke-width="1" opacity="0.3" />
                                 {bars.into_iter().collect_view()}
