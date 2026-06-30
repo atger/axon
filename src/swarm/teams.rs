@@ -36,6 +36,8 @@ pub struct AgentDef {
     pub schedule_mins: Option<u64>,
     /// The recurring task a proactive (scheduled) agent runs each cycle.
     pub task: Option<String>,
+    /// Placeholder hint shown in the spawn task textarea.
+    pub task_hint: Option<String>,
     pub builtin: bool,
 }
 
@@ -66,6 +68,8 @@ pub struct DefForm {
     pub schedule_mins: Option<u64>,
     #[serde(default)]
     pub task: Option<String>,
+    #[serde(default)]
+    pub task_hint: Option<String>,
 }
 
 // -- built-in axon team ----------------------------------------------------
@@ -90,6 +94,7 @@ pub fn builtin_teams() -> Vec<TeamWithAgents> {
         max_turns: None,
         schedule_mins: None,
         task: None,
+        task_hint: None,
         builtin: true,
     };
     let agents = vec![def(
@@ -139,7 +144,7 @@ fn policy_from_str(s: &str) -> ApprovalPolicy {
 // -- persistence -----------------------------------------------------------
 
 const DEF_COLS: &str =
-    "id, team_id, name, model, instructions, tools, policy, memory_window, max_turns, schedule_mins, task";
+    "id, team_id, name, model, instructions, tools, policy, memory_window, max_turns, schedule_mins, task, task_hint";
 
 fn row_to_def(row: &Row) -> rusqlite::Result<AgentDef> {
     let tools: String = row.get(5)?;
@@ -163,6 +168,7 @@ fn row_to_def(row: &Row) -> rusqlite::Result<AgentDef> {
         max_turns: mt.map(|n| n as usize),
         schedule_mins: sched.map(|n| n as u64),
         task: row.get(10)?,
+        task_hint: row.get(11)?,
         builtin: false,
     })
 }
@@ -287,8 +293,8 @@ pub fn add_def(team_id: &str, form: &DefForm) -> Result<AgentDef> {
     conn()
         .execute(
             "INSERT INTO agent_defs
-               (id, team_id, name, model, instructions, tools, policy, memory_window, max_turns, schedule_mins, task, created, updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+                (id, team_id, name, model, instructions, tools, policy, memory_window, max_turns, schedule_mins, task, task_hint, created, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
             params![
                 id,
                 team_id,
@@ -301,6 +307,7 @@ pub fn add_def(team_id: &str, form: &DefForm) -> Result<AgentDef> {
                 form.max_turns.map(|n| n as i64),
                 form.schedule_mins.map(|n| n as i64),
                 form.task,
+                form.task_hint,
                 now,
             ],
         )
@@ -317,6 +324,7 @@ pub fn add_def(team_id: &str, form: &DefForm) -> Result<AgentDef> {
         max_turns: form.max_turns,
         schedule_mins: form.schedule_mins,
         task: form.task.clone(),
+        task_hint: form.task_hint.clone(),
         builtin: false,
     })
 }
@@ -329,9 +337,9 @@ pub fn update_def(id: &str, form: &DefForm) -> Result<()> {
     let n = conn()
         .execute(
             "UPDATE agent_defs SET
-               name = ?2, model = ?3, instructions = ?4, tools = ?5,
-               policy = ?6, memory_window = ?7, max_turns = ?8,
-               schedule_mins = ?9, task = ?10, updated = ?11
+                name = ?2, model = ?3, instructions = ?4, tools = ?5,
+                policy = ?6, memory_window = ?7, max_turns = ?8,
+                schedule_mins = ?9, task = ?10, task_hint = ?11, updated = ?12
              WHERE id = ?1",
             params![
                 id,
@@ -344,6 +352,7 @@ pub fn update_def(id: &str, form: &DefForm) -> Result<()> {
                 form.max_turns.map(|n| n as i64),
                 form.schedule_mins.map(|n| n as i64),
                 form.task,
+                form.task_hint,
                 now,
             ],
         )

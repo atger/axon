@@ -51,17 +51,19 @@ pub(super) fn conn() -> MutexGuard<'static, Connection> {
                  policy        TEXT NOT NULL DEFAULT 'auto_approve',
                  memory_window INTEGER,
                  max_turns     INTEGER,
-                 schedule_mins INTEGER,
-                 task          TEXT,
-                 created       TEXT NOT NULL,
-                 updated       TEXT NOT NULL
-             );",
+                  schedule_mins INTEGER,
+                  task          TEXT,
+                  task_hint     TEXT,
+                  created       TEXT NOT NULL,
+                  updated       TEXT NOT NULL
+              );",
         )
         .expect("migrate tables");
         // Idempotent upgrades for DBs whose agent_defs predate the schedule
         // columns (errors when the column already exists are expected/ignored).
         let _ = c.execute("ALTER TABLE agent_defs ADD COLUMN schedule_mins INTEGER", []);
         let _ = c.execute("ALTER TABLE agent_defs ADD COLUMN task TEXT", []);
+        let _ = c.execute("ALTER TABLE agent_defs ADD COLUMN task_hint TEXT", []);
         Mutex::new(c)
     })
     .lock()
