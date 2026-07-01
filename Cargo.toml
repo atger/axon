@@ -24,7 +24,7 @@ llama-cpp-2 = "0.1"
 hf-hub = "0.3"
 encoding_rs = "0.8"
 toml = "0.8"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 dirs = "5"
 chrono = "0.4"
 autoagents = { version = "0.3.7", features = ["ollama", "logging"] }
