@@ -1,0 +1,4 @@
+[[hooks]]
+stage = "pre_build"
+command = "bash"
+command_arguments = ["scripts/jit-open-props.sh"]
