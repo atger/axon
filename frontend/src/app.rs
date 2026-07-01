@@ -142,26 +142,9 @@ pub fn App() -> impl IntoView {
                     <button class:active=move || state.tab.get() == ViewTab::Agents
                         on:click=move |_| { state.tab.set(ViewTab::Agents); state.editing_def.set(false); state.selected.set(None); }>"Agents"</button>
                 </nav>
-                <select class="model-select"
-                    on:change=move |ev| {
-                        let name = event_target_value(&ev);
-                        if !name.is_empty() {
-                            let st = state;
-                            spawn_local(async move {
-                                let _ = api::set_model(&name).await;
-                                st.model.set(name);
-                            });
-                        }
-                    }
-                    prop:value=move || state.model.get()>
-                    <option value="" disabled>"— select model —"</option>
-                    {move || state.models.get().into_iter().map(|m| {
-                        let is_current = m == state.model.get();
-                        view! {
-                            <option value=m.clone() selected=is_current>{m.clone()}</option>
-                        }
-                    }).collect_view()}
-                </select>
+                <span class="model-label" style="font-size: 13px; color: var(--muted); background: var(--btn-bg); padding: 4px 10px; border-radius: 4px; border: 1px solid var(--border);">
+                    "Model: " {move || state.model.get()}
+                </span>
                 <span class="spacer"></span>
                 <span id="conn" class="model">"● live"</span>
             </header>
@@ -294,12 +277,6 @@ fn agents_view(state: State) -> impl IntoView {
                                         <div class="row">
                                             <span class="badge sys">{tn.clone()}</span>
                                             <span class="id">{ac.name.clone()}</span>
-                                            {ac.schedule_mins.map(|m| view! { <span class="badge sys">{format!("⏲ {m}m")}</span> })}
-                                            {move || (active_count() > 0).then(|| view! {
-                                                <span class="badge running">{"● ".to_string() + &active_count().to_string()}</span>
-                                            })}
-                                            <span class="spacer"></span>
-                                            <span class="badge">{ac.model.clone().unwrap_or_else(|| "default".to_string())}</span>
                                         </div>
                                         <div class="task">{ac.instructions.clone()}</div>
                                     </div>
@@ -351,6 +328,32 @@ fn agents_view(state: State) -> impl IntoView {
                         } else {
                             view! {
                                 <div class="row toolbar">
+                                    <select
+                                        on:change=move |ev| {
+                                            let val = event_target_value(&ev);
+                                            let model_opt = if val == "default" { None } else { Some(val) };
+                                            if let Some(mut def) = state.ed_def.get() {
+                                                let id = def.id.clone();
+                                                if !id.is_empty() && !ro {
+                                                    def.model = model_opt;
+                                                    let def_clone = def.clone();
+                                                    state.ed_def.set(Some(def_clone.clone()));
+                                                    state.ed_md.set(agent_def_to_md(&def_clone));
+                                                    spawn_local(async move {
+                                                        let _ = api::update_def(&id, &def_clone).await;
+                                                        state.teams.set(api::fetch_teams().await);
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        prop:value=move || state.ed_def.get().and_then(|d| d.model).unwrap_or_else(|| "default".to_string())
+                                        style="width: auto; max-width: 180px;"
+                                        disabled=ro>
+                                        <option value="default">"Default Model"</option>
+                                        {move || state.models.get().into_iter().map(|m| {
+                                            view! { <option value=m.clone()>{m.clone()}</option> }
+                                        }).collect_view()}
+                                    </select>
                                     <span class="spacer"></span>
                                     <button on:click=move |_| state.raw_mode_def.set(true)>"Edit"</button>
                                 </div>
@@ -362,7 +365,44 @@ fn agents_view(state: State) -> impl IntoView {
                                                 on:input=move |e| state.spawn_task.set(event_target_value(&e))
                                                 placeholder=move || state.ed_def.get().and_then(|d| d.task_hint.clone()).unwrap_or_else(|| "Describe a task for this agent…".to_string())
                                                 style="min-height: 120px;"></textarea>
-                                            <button class="mt-sm" on:click=do_spawn style="width: 100%; height: 40px; font-weight: bold;">"Spawn"</button>
+                                            <div class="row mt-sm" style="gap: 8px;">
+                                                <select
+                                                    on:change=move |ev| {
+                                                        let val = event_target_value(&ev);
+                                                        let mins = val.parse::<u64>().unwrap_or(0);
+                                                        if let Some(mut def) = state.ed_def.get() {
+                                                            let id = def.id.clone();
+                                                            if !id.is_empty() && !ro {
+                                                                def.schedule_mins = if mins > 0 { Some(mins) } else { None };
+                                                                let current_task = state.spawn_task.get();
+                                                                if !current_task.is_empty() {
+                                                                    def.task = Some(current_task);
+                                                                }
+                                                                let def_clone = def.clone();
+                                                                state.ed_def.set(Some(def_clone.clone()));
+                                                                state.ed_md.set(agent_def_to_md(&def_clone));
+                                                                spawn_local(async move {
+                                                                    let _ = api::update_def(&id, &def_clone).await;
+                                                                    state.teams.set(api::fetch_teams().await);
+                                                                });
+                                                            }
+                                                        }
+                                                    }
+                                                    prop:value=move || state.ed_def.get().and_then(|d| d.schedule_mins).unwrap_or(0).to_string()
+                                                    style="width: auto; height: 40px;"
+                                                    disabled=ro>
+                                                    <option value="0">"Manual"</option>
+                                                    <option value="1">"1m"</option>
+                                                    <option value="5">"5m"</option>
+                                                    <option value="15">"15m"</option>
+                                                    <option value="30">"30m"</option>
+                                                    <option value="60">"1h"</option>
+                                                    <option value="360">"6h"</option>
+                                                    <option value="720">"12h"</option>
+                                                    <option value="1440">"24h"</option>
+                                                </select>
+                                                <button on:click=do_spawn style="flex: 1; height: 40px; font-weight: bold;">"Spawn"</button>
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
