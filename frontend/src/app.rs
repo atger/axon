@@ -307,7 +307,6 @@ fn agents_view(state: State) -> impl IntoView {
                         view! {
                             <div class="split">
                                 <div class="split-top">
-                                    <button on:click=move |_| state.selected.set(None)>"← Back"</button>
                                     <TimelineView state=state />
                                 </div>
                                 <div class="split-bottom">
@@ -454,7 +453,8 @@ fn TimelineView(state: State) -> impl IntoView {
                 }}</span>
                 <button on:click=zoom_in>"+"</button>
             </div>
-            <svg class="timeline-svg" viewBox=view_box preserveAspectRatio="xMinYMin meet">
+            <svg class="timeline-svg" viewBox=view_box preserveAspectRatio="xMinYMin meet"
+                on:click=move |_| state.selected.set(None)>
                 {move || {
                     let now = js_sys::Date::now() / 1000.0;
                     let n = nrows();
@@ -649,7 +649,7 @@ fn TimelineView(state: State) -> impl IntoView {
                             let id_sel = id.clone();
                             view! {
                                 <rect x="0" y={y.to_string()} width="900" height={RH.to_string()} fill="transparent"
-                                    on:click=move |_| { state.selected.set(Some(id_sel.clone())); state.editing_def.set(false); }
+                                    on:click=move |ev| { ev.stop_propagation(); state.selected.set(Some(id_sel.clone())); state.editing_def.set(false); }
                                     style="cursor:pointer" />
                             }.into_any()
                         });
