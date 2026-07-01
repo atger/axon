@@ -334,7 +334,7 @@ fn agents_view(state: State) -> impl IntoView {
                                     <h3>{name.clone()}</h3>
                                     <span class="spacer"></span>
                                     {ro.then(|| view! { <span class="badge sys">"read-only"</span> })}
-                                    <button on:click=move |_| state.raw_mode_def.set(false)>"view"</button>
+                                    <button on:click=move |_| state.raw_mode_def.set(false)>"View"</button>
                                     <button on:click=move |_| { state.editing_def.set(false); }>"Close"</button>
                                 </div>
                                 <textarea class="md-edit" prop:value=move || state.ed_md.get()
@@ -352,7 +352,7 @@ fn agents_view(state: State) -> impl IntoView {
                                     <h3>{name.clone()}</h3>
                                     <span class="spacer"></span>
                                     {ro.then(|| view! { <span class="badge sys">"read-only"</span> })}
-                                    <button on:click=move |_| state.raw_mode_def.set(true)>"edit"</button>
+                                    <button on:click=move |_| state.raw_mode_def.set(true)>"Edit"</button>
                                     <button on:click=move |_| { state.editing_def.set(false); }>"Close"</button>
                                 </div>
                                 <div class="md-preview" inner_html=move || render_agent_md(&state.ed_md.get())></div>
@@ -926,7 +926,7 @@ fn TaskDetail(state: State) -> impl IntoView {
                         <button class="btn-reject" on:click=reject>"Reject"</button>
                     })}
                     <button on:click=move |_| state.raw_mode.update(|r| *r = !*r)>
-                        {move || if state.raw_mode.get() { "view" } else { "edit" }}</button>
+                        {move || if state.raw_mode.get() { "View" } else { "Edit" }}</button>
                 </div>
                 {move || if state.raw_mode.get() {
                     let id_save = id_save.clone();
