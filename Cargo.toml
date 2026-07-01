@@ -7,7 +7,7 @@ license = "Apache-2.0"
 edition = "2024"
 
 [dependencies]
-crossterm = "0.28.1"
+crossterm = "0.29.0"
 ratatui = "0.29"
 color-eyre = "0.6.3"
 clap = { version = "4.6.1", features = ["derive"] }
