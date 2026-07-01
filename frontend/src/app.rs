@@ -192,7 +192,10 @@ fn agents_view(state: State) -> impl IntoView {
     };
 
     let save = move || {
-        let def = state.ed_def.get().unwrap_or_else(|| blank_def("custom".to_string()));
+        let def = state
+            .ed_def
+            .get()
+            .unwrap_or_else(|| blank_def("custom".to_string()));
         let updated = md_to_agent_def(&state.ed_md.get(), &def);
         let id = if updated.id.is_empty() {
             None
@@ -216,9 +219,13 @@ fn agents_view(state: State) -> impl IntoView {
     };
 
     let del = move |_| {
-        let id = state.ed_def
-            .get()
-            .and_then(|d| if d.id.is_empty() { None } else { Some(d.id.clone()) });
+        let id = state.ed_def.get().and_then(|d| {
+            if d.id.is_empty() {
+                None
+            } else {
+                Some(d.id.clone())
+            }
+        });
         if let Some(id) = id {
             state.editing_def.set(false);
             spawn_local(async move {
@@ -230,7 +237,9 @@ fn agents_view(state: State) -> impl IntoView {
 
     let do_spawn = move |_| {
         let task = state.spawn_task.get().trim().to_string();
-        if task.is_empty() { return; }
+        if task.is_empty() {
+            return;
+        }
         if let Some(def) = state.ed_def.get() {
             if !def.id.is_empty() {
                 let id = def.id.clone();
@@ -409,8 +418,16 @@ fn TimelineView(state: State) -> impl IntoView {
         for agent in agents.iter() {
             if let Some(def_name) = &agent.def_name {
                 if let Some(&mins) = def_map.get(def_name.as_str()) {
-                    let short = if agent.id.len() > 6 { &agent.id[..6] } else { &agent.id };
-                    groups.push((format!("{} ({})", def_name, short), mins, vec![agent.clone()]));
+                    let short = if agent.id.len() > 6 {
+                        &agent.id[..6]
+                    } else {
+                        &agent.id
+                    };
+                    groups.push((
+                        format!("{} ({})", def_name, short),
+                        mins,
+                        vec![agent.clone()],
+                    ));
                 }
             }
         }
@@ -427,14 +444,21 @@ fn TimelineView(state: State) -> impl IntoView {
     let nonscheduled = move || {
         let agents = state.agents.get();
         let teams = state.teams.get();
-        let scheduled_names: std::collections::HashSet<String> = teams.iter()
+        let scheduled_names: std::collections::HashSet<String> = teams
+            .iter()
             .flat_map(|tw| &tw.agents)
             .filter(|d| d.schedule_mins.unwrap_or(0) > 0)
             .map(|d| d.name.clone())
             .collect();
-        agents.iter().filter(|a| {
-            a.def_name.as_deref().map(|n| !scheduled_names.contains(n)).unwrap_or(true)
-        }).count()
+        agents
+            .iter()
+            .filter(|a| {
+                a.def_name
+                    .as_deref()
+                    .map(|n| !scheduled_names.contains(n))
+                    .unwrap_or(true)
+            })
+            .count()
     };
 
     let view_box = move || {
@@ -448,8 +472,20 @@ fn TimelineView(state: State) -> impl IntoView {
     };
 
     let zoom_max = ZOOM_LEVELS.len() as i32 - 1;
-    let zoom_out = move |_| { zoom_idx.update(|i| if *i < zoom_max { *i += 1 }) };
-    let zoom_in = move |_| { zoom_idx.update(|i| if *i > 0 { *i -= 1 }) };
+    let zoom_out = move |_| {
+        zoom_idx.update(|i| {
+            if *i < zoom_max {
+                *i += 1
+            }
+        })
+    };
+    let zoom_in = move |_| {
+        zoom_idx.update(|i| {
+            if *i > 0 {
+                *i -= 1
+            }
+        })
+    };
 
     view! {
         <div class="timeline-wrap" node_ref=wrap_ref>
@@ -714,11 +750,17 @@ fn TimelineView(state: State) -> impl IntoView {
 #[component]
 fn Detail(state: State) -> impl IntoView {
     move || match state.selected.get() {
-        None => view! { <h3 class="muted placeholder">"select an agent to view its trace"</h3> }.into_any(),
+        None => view! { <h3 class="muted placeholder">"select an agent to view its trace"</h3> }
+            .into_any(),
         Some(id) => {
             let lines = state.logs.get().get(&id).cloned().unwrap_or_default();
-            let status = state.agents.get().into_iter().find(|a| a.id == id)
-                .map(|a| a.status).unwrap_or_default();
+            let status = state
+                .agents
+                .get()
+                .into_iter()
+                .find(|a| a.id == id)
+                .map(|a| a.status)
+                .unwrap_or_default();
             view! {
                 <h3>{id.clone()} " — " {status}</h3>
                 <div class="log">
@@ -726,7 +768,8 @@ fn Detail(state: State) -> impl IntoView {
                         .map(|l| view! { <div class=format!("line {}", l.class)>{l.text}</div> })
                         .collect_view()}
                 </div>
-            }.into_any()
+            }
+            .into_any()
         }
     }
 }
@@ -790,7 +833,10 @@ fn tasks_view(state: State) -> impl IntoView {
 
 fn task_card(state: State, t: Task) -> impl IntoView {
     let id = t.id.clone();
-    let selected = { let id = id.clone(); move || state.task_selected.get().as_deref() == Some(id.as_str()) };
+    let selected = {
+        let id = id.clone();
+        move || state.task_selected.get().as_deref() == Some(id.as_str())
+    };
     let open = {
         let t = t.clone();
         move |_| {
@@ -830,7 +876,8 @@ fn TaskDetail(state: State) -> impl IntoView {
                     spawn_local(async move {
                         let body = st.edit_body.get_untracked();
                         let teams = st.teams.get_untracked();
-                        let team_id = teams.iter()
+                        let team_id = teams
+                            .iter()
                             .find(|t| !t.team.builtin)
                             .map(|t| t.team.id.clone())
                             .unwrap_or_else(|| "custom".to_string());
@@ -839,8 +886,13 @@ fn TaskDetail(state: State) -> impl IntoView {
                             let _ = api::create_def(&team_id, &def).await;
                             st.teams.set(api::fetch_teams().await);
                         }
-                        let _ = api::update_task(&id, &st.edit_title.get_untracked(),
-                            &st.edit_body.get_untracked(), Some("implemented")).await;
+                        let _ = api::update_task(
+                            &id,
+                            &st.edit_title.get_untracked(),
+                            &st.edit_body.get_untracked(),
+                            Some("implemented"),
+                        )
+                        .await;
                         st.refresh_tasks();
                     });
                 }
@@ -852,8 +904,13 @@ fn TaskDetail(state: State) -> impl IntoView {
                 move |_| {
                     let id = id.clone();
                     spawn_local(async move {
-                        let _ = api::update_task(&id, &st.edit_title.get_untracked(),
-                            &st.edit_body.get_untracked(), Some("rejected")).await;
+                        let _ = api::update_task(
+                            &id,
+                            &st.edit_title.get_untracked(),
+                            &st.edit_body.get_untracked(),
+                            Some("rejected"),
+                        )
+                        .await;
                         st.refresh_tasks();
                     });
                 }
@@ -900,9 +957,15 @@ fn TaskDetail(state: State) -> impl IntoView {
 }
 
 fn md_to_html(src: &str) -> String {
-    let parser = pulldown_cmark::Parser::new(src);
+    use pulldown_cmark::{html, Options, Parser};
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+    let parser = Parser::new_ext(src, options);
     let mut out = String::new();
-    pulldown_cmark::html::push_html(&mut out, parser);
+    html::push_html(&mut out, parser);
     out
 }
 
@@ -910,8 +973,11 @@ fn md_to_html(src: &str) -> String {
 /// Strips frontmatter, renders metadata as a compact section, then the body.
 fn render_agent_md(md: &str) -> String {
     let trimmed = md.trim();
+    if trimmed.is_empty() {
+        return "<div class=\"muted placeholder\">No content</div>".to_string();
+    }
     if !trimmed.starts_with("---") {
-        return md_to_html(trimmed);
+        return format!("<div class=\"md-body\">{}</div>", md_to_html(trimmed));
     }
     let after_first = &trimmed[3..];
     let end = after_first.find("\n---").unwrap_or(after_first.len());
@@ -966,7 +1032,11 @@ fn render_agent_md(md: &str) -> String {
                 "tools" => {
                     if v.starts_with('[') && v.ends_with(']') {
                         let inner = &v[1..v.len() - 1];
-                        tools = inner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                        tools = inner
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
                     }
                 }
                 "memory_window" if !v.is_empty() => {
@@ -992,22 +1062,35 @@ fn render_agent_md(md: &str) -> String {
     }
 
     if !tools.is_empty() {
-        meta.push_str(&format!("<span class=\"meta-badge\">tools: {}</span> ", tools.join(", ")));
+        meta.push_str(&format!(
+            "<span class=\"meta-badge\">tools: {}</span> ",
+            tools.join(", ")
+        ));
     }
     if !schedule.is_empty() {
-        meta.push_str(&format!("<span class=\"meta-badge\">⏲ {}</span> ", schedule));
+        meta.push_str(&format!(
+            "<span class=\"meta-badge\">⏲ {}</span> ",
+            schedule
+        ));
     }
     if !task.is_empty() {
-        meta.push_str(&format!("<span class=\"meta-badge\">task: {}</span> ", task));
+        meta.push_str(&format!(
+            "<span class=\"meta-badge\">task: {}</span> ",
+            task
+        ));
     }
     if !task_hint.is_empty() {
-        meta.push_str(&format!("<span class=\"meta-badge\">hint: {}</span> ", task_hint));
+        meta.push_str(&format!(
+            "<span class=\"meta-badge\">hint: {}</span> ",
+            task_hint
+        ));
     }
 
     let mut html = String::from("<div class=\"agent-meta\">");
     html.push_str(&meta);
-    html.push_str("</div>\n");
+    html.push_str("</div>\n<div class=\"md-body\">");
     html.push_str(&md_to_html(body));
+    html.push_str("</div>");
     html
 }
 
@@ -1036,7 +1119,8 @@ task_hint:  # placeholder shown in the spawn task textarea (optional)
 # Agent instructions
 
 Describe what this agent should do...
-".to_string();
+"
+        .to_string();
     }
 
     let mut fm = String::new();
@@ -1165,7 +1249,11 @@ fn md_to_agent_def(md: &str, fallback: &AgentDef) -> AgentDef {
                     } else if v.starts_with('[') && v.ends_with(']') {
                         // Inline list [a, b, c]
                         let inner = &v[1..v.len() - 1];
-                        def.tools = inner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                        def.tools = inner
+                            .split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect();
                     }
                 }
                 "policy" => def.policy = v.to_string(),
@@ -1248,7 +1336,9 @@ fn handle_event(state: State, ev: SwarmEvent) {
                                 a.cycle_completed.clone(),
                                 a.status.clone(),
                             ));
-                            if entry.len() > 5 { entry.remove(0); }
+                            if entry.len() > 5 {
+                                entry.remove(0);
+                            }
                         });
                     }
                 }
@@ -1272,14 +1362,19 @@ fn handle_event(state: State, ev: SwarmEvent) {
     }
 
     if let Some(line) = format_event(kind, data) {
-        state.logs.update(|m| m.entry(id.clone()).or_default().push(line));
+        state
+            .logs
+            .update(|m| m.entry(id.clone()).or_default().push(line));
     }
 }
 
 fn format_event(kind: &str, d: &Value) -> Option<LogLine> {
     let s = |k: &str| d.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
     let (class, text) = match kind {
-        "TaskStarted" => ("ev-turn", format!("▶ task started: {}", s("task_description"))),
+        "TaskStarted" => (
+            "ev-turn",
+            format!("▶ task started: {}", s("task_description")),
+        ),
         "TurnStarted" => (
             "ev-turn",
             format!(
@@ -1288,15 +1383,28 @@ fn format_event(kind: &str, d: &Value) -> Option<LogLine> {
                 d.get("max_turns").and_then(|v| v.as_u64()).unwrap_or(0)
             ),
         ),
-        "ToolCallRequested" => ("ev-tool", format!("🔧 {}({})", s("tool_name"), trunc(&s("arguments"), 200))),
+        "ToolCallRequested" => (
+            "ev-tool",
+            format!("🔧 {}({})", s("tool_name"), trunc(&s("arguments"), 200)),
+        ),
         "ToolCallCompleted" => (
             "ev-tool",
-            format!("✓ {} → {}", s("tool_name"), trunc(&d.get("result").map(|v| v.to_string()).unwrap_or_default(), 200)),
+            format!(
+                "✓ {} → {}",
+                s("tool_name"),
+                trunc(
+                    &d.get("result").map(|v| v.to_string()).unwrap_or_default(),
+                    200
+                )
+            ),
         ),
         "ToolCallFailed" => ("ev-error", format!("✗ {}: {}", s("tool_name"), s("error"))),
         "StreamChunk" => {
-            let t = d.get("chunk").and_then(|c| c.get("delta").or_else(|| c.get("response")))
-                .and_then(|v| v.as_str()).unwrap_or("");
+            let t = d
+                .get("chunk")
+                .and_then(|c| c.get("delta").or_else(|| c.get("response")))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if t.is_empty() {
                 return None;
             }
@@ -1306,7 +1414,10 @@ fn format_event(kind: &str, d: &Value) -> Option<LogLine> {
         "TaskError" => ("ev-error", format!("❌ {}", s("error"))),
         _ => return None,
     };
-    Some(LogLine { class: class.to_string(), text })
+    Some(LogLine {
+        class: class.to_string(),
+        text,
+    })
 }
 
 fn trunc(s: &str, n: usize) -> String {
