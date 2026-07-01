@@ -22,6 +22,10 @@ pub struct AgentInfo {
     pub def_name: Option<String>,
      #[serde(default)]
     pub cycle_started: String,
+     #[serde(default)]
+    pub cycle_completed: String,
+     #[serde(default)]
+    pub started: String,
      // Lifecycle tracking fields
      #[serde(default)]
     pub last_seen_stage: String,

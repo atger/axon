@@ -48,6 +48,9 @@ struct State {
     ed_def: RwSignal<Option<AgentDef>>,
     raw_mode_def: RwSignal<bool>,
     spawn_task: RwSignal<String>,
+    /// Completed cycles saved per agent so they remain visible even after
+    /// cycle_started is updated on the next publish.
+    prev_cycles: RwSignal<HashMap<String, Vec<(String, String, String)>>>,
 }
 
 impl State {
@@ -105,6 +108,7 @@ pub fn App() -> impl IntoView {
         ed_def: RwSignal::new(None),
         raw_mode_def: RwSignal::new(false),
         spawn_task: RwSignal::new(String::new()),
+        prev_cycles: RwSignal::new(HashMap::new()),
     };
 
     spawn_local(async move {
@@ -512,6 +516,24 @@ fn TimelineView(state: State) -> impl IntoView {
                             if t.is_nan() || t <= 0.0 { None } else { Some(t) }
                         });
 
+                        let agent_started = primary.and_then(|a| {
+                            let s = a.started.as_str();
+                            if s.is_empty() { return None; }
+                            let js_val = wasm_bindgen::JsValue::from_str(s);
+                            let d = js_sys::Date::new(&js_val);
+                            let t = d.get_time() / 1000.0;
+                            if t.is_nan() || t <= 0.0 { None } else { Some(t) }
+                        });
+
+                        let cycle_completed = primary.and_then(|a| {
+                            let s = a.cycle_completed.as_str();
+                            if s.is_empty() { return None; }
+                            let js_val = wasm_bindgen::JsValue::from_str(s);
+                            let d = js_sys::Date::new(&js_val);
+                            let t = d.get_time() / 1000.0;
+                            if t.is_nan() || t <= 0.0 { None } else { Some(t) }
+                        });
+
                         // Build cycle bars within the visible window
                         let mut bars = Vec::new();
                         let win_start = now - wp;
@@ -522,17 +544,28 @@ fn TimelineView(state: State) -> impl IntoView {
                             let last_idx = ((win_end - cs) / interval_s).floor() as i32;
                             for idx in first_idx..=last_idx {
                                 let cycle_t = cs + idx as f64 * interval_s;
-                                let is_current = cycle_t <= now && cycle_t + interval_s > now;
-                                let is_past = cycle_t + interval_s <= now;
+                                let cycle_end = cycle_t + interval_s;
+                                if let Some(started) = agent_started {
+                                    if cycle_end < started { continue; }
+                                }
+                                let is_current = cycle_t <= now && cycle_end > now;
+                                let is_past = cycle_end <= now;
+                                let is_latest = idx == 0;
+                                if is_past && !is_latest { continue; }
+                                let bar_end_ts = cycle_completed.unwrap_or(cycle_end).min(cycle_end);
                                 let (bar_start, bar_end, cls) = if is_past {
-                                    (cycle_t, cycle_t, "past")
+                                    match status {
+                                        "idle" | "done" => (cycle_t, bar_end_ts, "done"),
+                                        "error" => (cycle_t, bar_end_ts, "error"),
+                                        _ => continue,
+                                    }
                                 } else if is_current {
                                     let agent_alive = matches!(status, "running" | "queued");
-                                    let in_cycle = cycle_t <= cs && cs < cycle_t + interval_s;
+                                    let in_cycle = cycle_t <= cs && cs < cycle_end;
                                     if !agent_alive && !in_cycle { continue; }
                                     match status {
-                                        "idle" | "done" => (cycle_t, cycle_t + interval_s * 0.15, "done"),
-                                        "error" => (cycle_t, cycle_t + interval_s * 0.15, "error"),
+                                        "idle" | "done" => (cycle_t, bar_end_ts, "done"),
+                                        "error" => (cycle_t, bar_end_ts, "error"),
                                         _ => (cycle_t, now, "running"),
                                     }
                                 } else {
@@ -545,10 +578,6 @@ fn TimelineView(state: State) -> impl IntoView {
                                 let bar_y = y_center - 8.0;
                                 let bar_h = 16.0;
                                 let rect = match cls {
-                                    "past" => view! {
-                                        <rect x={x1.to_string()} y={bar_y.to_string()} width={w.to_string()} height={bar_h.to_string()}
-                                            fill="var(--muted)" opacity="0.25" rx="1" />
-                                    }.into_any(),
                                     "future" => view! {
                                         <rect x={x1.to_string()} y={bar_y.to_string()} width={w.to_string()} height={bar_h.to_string()} rx="4"
                                             fill="var(--accent)" opacity="0.15" stroke="var(--accent)" stroke-width="1" stroke-dasharray="3,3" />
@@ -567,6 +596,39 @@ fn TimelineView(state: State) -> impl IntoView {
                                     }.into_any(),
                                 };
                                 bars.push(rect);
+                            }
+                            // Render saved completed cycles (prev_cycles) for each agent in this row
+                            let prev_map = state.prev_cycles.get();
+                            for agent in &ags {
+                                if let Some(entries) = prev_map.get(&agent.id) {
+                                    for (pcs, pcc, pst) in entries {
+                                        let parse = |s: &str| -> Option<f64> {
+                                            if s.is_empty() { return None; }
+                                            let d = js_sys::Date::new(&wasm_bindgen::JsValue::from_str(s));
+                                            let t = d.get_time() / 1000.0;
+                                            if t.is_nan() || t <= 0.0 { None } else { Some(t) }
+                                        };
+                                        if let (Some(start), Some(end)) = (parse(pcs), parse(pcc)) {
+                                            let end = end.min(start + interval_s);
+                                            if end >= win_start && start <= win_end {
+                                                let x1 = t2x(start.max(win_start)).max(tx);
+                                                let x2 = t2x(end.min(win_end)).min(tx + tw);
+                                                let w = (x2 - x1).max(2.0);
+                                                if w >= 1.0 {
+                                                    let cls = if pst == "error" { "error" } else { "done" };
+                                                    let (fill, op) = match cls {
+                                                        "error" => ("var(--red)", "0.7"),
+                                                        _ => ("var(--green)", "0.5"),
+                                                    };
+                                                    bars.push(view! {
+                                                        <rect x={x1.to_string()} y={(y_center - 8.0).to_string()} width={w.to_string()} height="16" rx="4"
+                                                            fill={fill} opacity={op} />
+                                                    }.into_any());
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         } else if !ags.is_empty() {
                             let x1 = tx;
@@ -1165,11 +1227,38 @@ fn handle_event(state: State, ev: SwarmEvent) {
         "TaskError" => Some("error"),
         _ => None,
     } {
-        state.agents.update(|ags| {
-            if let Some(a) = ags.iter_mut().find(|a| a.id == id) {
-                a.status = status.to_string();
-            }
-        });
+        if status == "running" {
+            state.agents.with(|ags| {
+                if let Some(a) = ags.iter().find(|a| a.id == id) {
+                    if !a.cycle_completed.is_empty() {
+                        state.prev_cycles.update(|m| {
+                            let entry = m.entry(id.clone()).or_default();
+                            entry.push((
+                                a.cycle_started.clone(),
+                                a.cycle_completed.clone(),
+                                a.status.clone(),
+                            ));
+                            if entry.len() > 5 { entry.remove(0); }
+                        });
+                    }
+                }
+            });
+        }
+        if status == "done" || status == "error" {
+            let now_iso = js_sys::Date::new_0().to_iso_string();
+            state.agents.update(|ags| {
+                if let Some(a) = ags.iter_mut().find(|a| a.id == id) {
+                    a.cycle_completed = now_iso.into();
+                    a.status = status.to_string();
+                }
+            });
+        } else {
+            state.agents.update(|ags| {
+                if let Some(a) = ags.iter_mut().find(|a| a.id == id) {
+                    a.status = status.to_string();
+                }
+            });
+        }
     }
 
     if let Some(line) = format_event(kind, data) {

@@ -67,6 +67,10 @@ pub struct AgentInfo {
     /// agents); updated each time a new task is published.
     #[serde(default)]
     pub cycle_started: String,
+    /// ISO-8601 timestamp when the current cycle completed (for scheduled/perpetual
+    /// agents); empty string while the cycle is still running.
+    #[serde(default)]
+    pub cycle_completed: String,
 }
 
 struct AgentEntry {
@@ -279,7 +283,8 @@ impl Swarm {
             perpetual: spec.perpetual,
             def_name: spec.def_name,
             started: now.clone(),
-            cycle_started: now,
+            cycle_started: now.clone(),
+            cycle_completed: String::new(),
         };
         self.agents
             .write()
@@ -314,6 +319,7 @@ impl Swarm {
             e.info.task = task_text;
             e.info.status = AgentStatus::Queued;
             e.info.cycle_started = chrono::Local::now().to_rfc3339();
+            e.info.cycle_completed = String::new();
             eprintln!("[swarm] publish_to: found agent, set status=Queued");
         } else {
             eprintln!("[swarm] publish_to: agent {id} NOT found in agents map");
@@ -589,6 +595,9 @@ no JSON, no commentary.";
                     } else {
                         status
                     };
+                    if matches!(status, AgentStatus::Done | AgentStatus::Error) {
+                        entry.info.cycle_completed = chrono::Local::now().to_rfc3339();
+                    }
                 }
 
                 if let Ok(value) = serde_json::to_value(&event) {
@@ -666,8 +675,28 @@ no JSON, no commentary.";
         self.broadcast_control("TasksChanged");
         let me = Arc::clone(self);
         let id = agent_id.to_string();
+
+        // Align next publish to the schedule boundary (cycle_started + interval)
+        // rather than sleeping a full interval from completion time.
+        let cs_str = self.agents.read().await.get(agent_id)
+            .map(|e| e.info.cycle_started.clone())
+            .unwrap_or_default();
+        let sleep_dur = if cs_str.is_empty() {
+            entry.interval
+        } else if let Ok(cs) = chrono::DateTime::parse_from_rfc3339(&cs_str) {
+            let cs_utc = cs.with_timezone(&chrono::Utc);
+            let elapsed = (chrono::Utc::now() - cs_utc).to_std().unwrap_or(Duration::ZERO);
+            if elapsed < entry.interval {
+                entry.interval - elapsed
+            } else {
+                Duration::ZERO
+            }
+        } else {
+            entry.interval
+        };
+
         tokio::spawn(async move {
-            tokio::time::sleep(entry.interval).await;
+            tokio::time::sleep(sleep_dur).await;
             let status = me.agents.read().await.get(&id).map(|e| e.info.status);
             let alive = status.map(|s| s != AgentStatus::Cancelled).unwrap_or(false);
             let still_scheduled = me.scheduled.lock().await.contains_key(&id);
