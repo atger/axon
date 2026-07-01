@@ -59,6 +59,7 @@ pub async fn create_def(
     match teams::add_def(&team_id, &form) {
         Ok(def) => {
             swarm.resync_schedules().await;
+            swarm.broadcast_control("Reload");
             (StatusCode::CREATED, Json(def)).into_response()
         }
         Err(e) => (StatusCode::BAD_REQUEST, e.to_string()).into_response(),

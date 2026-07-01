@@ -15,7 +15,15 @@ pub struct ModelEntry {
     pub context_window: usize,
 }
 
-#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct McpServerConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub struct AxonConfig {
     pub model: Option<String>,
     pub backend: Option<String>,
@@ -24,6 +32,45 @@ pub struct AxonConfig {
     pub no_download: Option<bool>,
     #[serde(default)]
     pub models: Vec<ModelEntry>,
+    #[serde(default)]
+    pub mcp_servers: std::collections::HashMap<String, McpServerConfig>,
+}
+
+impl Default for AxonConfig {
+    fn default() -> Self {
+        let mut mcp_servers = std::collections::HashMap::new();
+        let mut github_env = std::collections::HashMap::new();
+        github_env.insert("GITHUB_PERSONAL_ACCESS_TOKEN".to_string(), "".to_string());
+        github_env.insert("GITHUB_HOST".to_string(), "https://github.com".to_string());
+
+        mcp_servers.insert(
+            "github".to_string(),
+            McpServerConfig {
+                command: "docker".to_string(),
+                args: vec![
+                    "run".to_string(),
+                    "-i".to_string(),
+                    "--rm".to_string(),
+                    "-e".to_string(),
+                    "GITHUB_PERSONAL_ACCESS_TOKEN".to_string(),
+                    "-e".to_string(),
+                    "GITHUB_HOST".to_string(),
+                    "ghcr.io/github/github-mcp-server".to_string(),
+                ],
+                env: github_env,
+            },
+        );
+
+        Self {
+            model: None,
+            backend: None,
+            ollama_url: None,
+            context_window: None,
+            no_download: None,
+            models: Vec::new(),
+            mcp_servers,
+        }
+    }
 }
 
 impl AxonConfig {

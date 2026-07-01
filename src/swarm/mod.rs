@@ -16,6 +16,7 @@ use autoagents::core::agent::memory::SlidingWindowMemory;
 use autoagents::core::agent::prebuilt::executor::ReActAgent;
 use autoagents::core::agent::task::Task;
 use autoagents::core::agent::{ActorAgent, AgentBuilder};
+use autoagents::core::tool::ToolT;
 use autoagents::core::environment::Environment;
 use autoagents::core::runtime::{SingleThreadedRuntime, TypedRuntime};
 use autoagents::llm::LLMProvider;
@@ -23,6 +24,7 @@ use autoagents::llm::builder::LLMBuilder;
 use autoagents::llm::completion::CompletionRequest;
 use autoagents::protocol::{Event, SubmissionId};
 use color_eyre::eyre::{Result, WrapErr};
+use rust_mcp_sdk::mcp_client::ClientRuntime;
 use serde::Serialize;
 use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
 use tokio_stream::StreamExt;
@@ -114,6 +116,7 @@ struct AgentSpec {
     perpetual: bool,
     def_name: Option<String>,
     spawn_tx: Option<mpsc::UnboundedSender<SpawnCmd>>,
+    mcp_tools: Vec<Arc<dyn ToolT>>,
 }
 
 /// A request, raised by an agent's `spawn_agent` tool, for the swarm to spawn
@@ -165,6 +168,9 @@ pub struct Swarm {
     /// Maps a scheduled def id → (running agent id, config signature).
     sched_index: Mutex<HashMap<String, (String, String)>>,
     agent_history: Mutex<VecDeque<HistoricAgent>>,
+    mcp_tools: RwLock<Vec<Arc<dyn ToolT>>>,
+    #[allow(dead_code)]
+    mcp_clients: RwLock<Vec<Arc<ClientRuntime>>>,
     _env: Mutex<Environment>,
 }
 
@@ -203,11 +209,31 @@ impl Swarm {
             scheduled: Mutex::new(HashMap::new()),
             sched_index: Mutex::new(HashMap::new()),
             agent_history: Mutex::new(VecDeque::new()),
+            mcp_tools: RwLock::new(Vec::new()),
+            mcp_clients: RwLock::new(Vec::new()),
             _env: Mutex::new(env),
         });
 
         swarm.clone().spawn_event_pump(event_stream);
         swarm.clone().spawn_pump(spawn_rx);
+
+        // Load MCP tools in the background so failures/slow startup don't block the dashboard.
+        let swarm_clone = swarm.clone();
+        tokio::spawn(async move {
+            let config = crate::config::AxonConfig::load();
+            for (name, server) in &config.mcp_servers {
+                match crate::tools::mcp::load_raw_mcp_tools(name, &server.command, &server.args, &server.env).await {
+                    Ok((tools, client)) => {
+                        let mut mcp_list = swarm_clone.mcp_tools.write().await;
+                        for t in tools {
+                            mcp_list.push(Arc::new(tools::McpSwarmTool::new(t)));
+                        }
+                        swarm_clone.mcp_clients.write().await.push(client);
+                    }
+                    Err(e) => eprintln!("Warning: swarm failed to load MCP tools for {name}: {e}"),
+                }
+            }
+        });
 
         // Start any proactive (scheduled) user agents saved in the DB.
         swarm.resync_schedules().await;
@@ -257,9 +283,9 @@ impl Swarm {
         let control = AgentControl::new(spec.policy);
         let coding = match spec.prompt {
             Some(prompt) => {
-                CodingAgent::coder(&spec.id, control.clone(), prompt, spec.allowed_tools, spec.spawn_tx)
+                CodingAgent::coder(&spec.id, control.clone(), prompt, spec.allowed_tools, spec.spawn_tx, spec.mcp_tools)
             }
-            None => CodingAgent::with_role(&spec.id, spec.role, control.clone()),
+            None => CodingAgent::with_role(&spec.id, spec.role, control.clone(), spec.mcp_tools),
         };
         let agent = ReActAgent::with_max_turns(coding, spec.max_turns);
         let topic = Topic::<Task>::new(&spec.id);
@@ -367,6 +393,7 @@ impl Swarm {
             perpetual: false,
             def_name: Some(def.name),
             spawn_tx: Some(self.spawn_tx.clone()),
+            mcp_tools: self.mcp_tools.read().await.clone(),
         })
         .await?;
         self.publish_to(&id, task).await?;
@@ -459,6 +486,7 @@ impl Swarm {
             perpetual: true,
             def_name: Some(def.name.clone()),
             spawn_tx: Some(self.spawn_tx.clone()),
+            mcp_tools: self.mcp_tools.read().await.clone(),
         })
         .await?;
         self.scheduled

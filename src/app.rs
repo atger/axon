@@ -82,6 +82,7 @@ pub struct App<'a> {
     user_scrolled: bool,
     model_selector: ModelSelector,
     model_name_rect: Rect,
+    mcp_clients: Vec<Arc<rust_mcp_sdk::mcp_client::ClientRuntime>>,
 }
 
 impl<'a> App<'a> {
@@ -92,6 +93,7 @@ impl<'a> App<'a> {
         no_download: bool,
         context_window: Option<usize>,
         skill_content: Option<String>,
+        tools: Arc<ToolRegistry>,
     ) -> Self {
         let context = ContextProvider::new(skill_content);
         let cw = context_window.unwrap_or_else(|| backend.context_window());
@@ -104,7 +106,7 @@ impl<'a> App<'a> {
             num_ctx: context_window,
             no_download,
             context,
-            tools: Arc::new(ToolRegistry::with_defaults()),
+            tools,
             chat: ChatWidget::new(),
             input: InputWidget::new(),
             generating: Generating::Idle,
@@ -117,7 +119,13 @@ impl<'a> App<'a> {
                 scroll: 0,
             },
             model_name_rect: Rect::new(0, 0, 0, 0),
+            mcp_clients: Vec::new(),
         }
+    }
+
+    fn with_mcp(mut self, clients: Vec<Arc<rust_mcp_sdk::mcp_client::ClientRuntime>>) -> Self {
+        self.mcp_clients = clients;
+        self
     }
 
     async fn run(
@@ -832,6 +840,11 @@ pub async fn run_tui(
     let mut terminal = ratatui::init();
     crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
     let (tx, rx) = mpsc::channel(64);
+
+    let config = crate::config::AxonConfig::load();
+    let (tools, clients) = ToolRegistry::from_config(&config).await;
+    let tools = Arc::new(tools);
+
     let result = App::new(
         backend,
         backend_kind,
@@ -839,7 +852,9 @@ pub async fn run_tui(
         no_download,
         context_window,
         skill_content,
+        tools,
     )
+    .with_mcp(clients)
     .run(&mut terminal, tx, rx)
     .await;
     crossterm::execute!(std::io::stdout(), DisableMouseCapture).ok();

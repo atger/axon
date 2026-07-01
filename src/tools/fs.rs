@@ -1,3 +1,4 @@
+use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{Tool, ToolError};
@@ -5,6 +6,7 @@ use super::{Tool, ToolError};
 pub struct ReadFileTool;
 pub struct WriteFileTool;
 
+#[async_trait]
 impl Tool for ReadFileTool {
     fn name(&self) -> &str {
         "read_file"
@@ -14,11 +16,11 @@ impl Tool for ReadFileTool {
         "read_file(path: string) — read the contents of a file"
     }
 
-    fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
-        let contents = std::fs::read_to_string(path)?;
+        let contents = tokio::fs::read_to_string(path).await?;
         // Truncate to ~8000 chars to stay within small model context budgets.
         const LIMIT: usize = 8000;
         if contents.len() > LIMIT {
@@ -33,6 +35,7 @@ impl Tool for ReadFileTool {
     }
 }
 
+#[async_trait]
 impl Tool for WriteFileTool {
     fn name(&self) -> &str {
         "write_file"
@@ -46,14 +49,14 @@ impl Tool for WriteFileTool {
         true
     }
 
-    fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
         let path = args["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'path'".into()))?;
         let content = args["content"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'content'".into()))?;
-        std::fs::write(path, content)?;
+        tokio::fs::write(path, content).await?;
         Ok(format!("wrote {} bytes to {path}", content.len()))
     }
 }

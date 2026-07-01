@@ -1,9 +1,11 @@
+use async_trait::async_trait;
 use serde_json::Value;
 
 use super::{Tool, ToolError};
 
 pub struct WebSearchTool;
 
+#[async_trait]
 impl Tool for WebSearchTool {
     fn name(&self) -> &str {
         "web_search"
@@ -13,7 +15,7 @@ impl Tool for WebSearchTool {
         "web_search(query: string) — search the web; use for current events, news, or anything you are unsure about"
     }
 
-    fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
         let query = args["query"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'query'".into()))?;

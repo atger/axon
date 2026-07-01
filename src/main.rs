@@ -109,7 +109,7 @@ async fn main() -> color_eyre::Result<()> {
     };
 
     match args.prompt.clone() {
-        Some(p) => runner::run_once(p, backend, args.context_window, skill_content).await,
+        Some(p) => runner::run_once(p, backend, &config, args.context_window, skill_content).await,
         None => {
             app::run_tui(
                 backend,
@@ -142,11 +142,11 @@ fn handle_config(cmd: &cli::ConfigCmd, config: &mut AxonConfig) -> color_eyre::R
                     .to_string(),
                 "context-window" => config
                     .context_window
-                    .map(|n| n.to_string())
+                    .map(|n: usize| n.to_string())
                     .unwrap_or_else(|| "(not set)".to_string()),
                 "no-download" => config
                     .no_download
-                    .map(|b| b.to_string())
+                    .map(|b: bool| b.to_string())
                     .unwrap_or_else(|| "(not set)".to_string()),
                 _ => color_eyre::eyre::bail!("unknown key '{key}'"),
             };
@@ -154,7 +154,7 @@ fn handle_config(cmd: &cli::ConfigCmd, config: &mut AxonConfig) -> color_eyre::R
         }
         cli::ConfigAction::List => {
             let path = AxonConfig::path()
-                .map(|p| p.display().to_string())
+                .map(|p: std::path::PathBuf| p.display().to_string())
                 .unwrap_or_else(|_| "~/.axon/config.toml".to_string());
             println!("# {path}");
             if let Some(v) = &config.model {

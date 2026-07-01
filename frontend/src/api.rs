@@ -1,5 +1,7 @@
 //! REST + WebSocket access to the axon `serve` backend, for the WASM dashboard.
 
+use std::collections::HashMap;
+
 use futures::StreamExt;
 use gloo_net::http::Request;
 use gloo_net::websocket::{Message, futures::WebSocket};
@@ -292,6 +294,59 @@ pub async fn update_task(id: &str, title: &str, body: &str, status: Option<&str>
 pub async fn set_model(name: &str) -> Result<(), String> {
     Request::post("/api/models")
         .json(&serde_json::json!({ "model": name }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct McpServerConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
+
+pub async fn fetch_mcp() -> HashMap<String, McpServerConfig> {
+    match Request::get("/api/mcp").send().await {
+        Ok(resp) => resp.json().await.unwrap_or_default(),
+        Err(_) => HashMap::new(),
+    }
+}
+
+pub async fn upsert_mcp(
+    id: &str,
+    command: &str,
+    args: Vec<String>,
+    env: HashMap<String, String>,
+) -> Result<(), String> {
+    Request::post("/api/mcp")
+        .json(&serde_json::json!({
+            "id": id,
+            "command": command,
+            "args": args,
+            "env": env,
+        }))
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn delete_mcp(id: &str) -> Result<(), String> {
+    Request::delete(&format!("/api/mcp/{id}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+pub async fn replace_all_mcp(servers: HashMap<String, McpServerConfig>) -> Result<(), String> {
+    Request::put("/api/mcp")
+        .json(&servers)
         .map_err(|e| e.to_string())?
         .send()
         .await

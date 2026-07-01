@@ -12,10 +12,12 @@ use crate::tools::ToolRegistry;
 pub async fn run_once(
     prompt: String,
     backend: Arc<dyn Backend>,
+    config: &crate::config::AxonConfig,
     context_window: Option<usize>,
     skill_content: Option<String>,
 ) -> color_eyre::Result<()> {
-    let tools = Arc::new(ToolRegistry::with_defaults());
+    let (tools, _clients): (_, Vec<_>) = ToolRegistry::from_config(config).await;
+    let tools = Arc::new(tools);
     let ctx = ContextProvider::new(skill_content);
     let cw = context_window.unwrap_or_else(|| backend.context_window());
 

@@ -198,6 +198,29 @@ fn list_defs(team_id: &str) -> Result<Vec<AgentDef>> {
 /// All teams (built-in first, then user teams), each with its agents.
 pub fn all_teams() -> Result<Vec<TeamWithAgents>> {
     let mut out = builtin_teams();
+    
+    // Load overrides from DB for built-in agents
+    let overrides: Vec<AgentDef> = {
+        let c = conn();
+        let mut stmt = c.prepare(&format!(
+            "SELECT {DEF_COLS} FROM agent_defs WHERE team_id = ?1"
+        ))?;
+        stmt.query_map(params![BUILTIN_TEAM_ID], row_to_def)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    for ovr in overrides {
+        if let Some(builtin_team) = out.iter_mut().find(|t| t.team.id == BUILTIN_TEAM_ID) {
+            if let Some(target) = builtin_team.agents.iter_mut().find(|a| a.id == ovr.id) {
+                // Preserve the builtin flag but overwrite everything else
+                let id = target.id.clone();
+                *target = ovr;
+                target.id = id;
+                target.builtin = true;
+            }
+        }
+    }
+
     for team in list_user_teams()? {
         let agents = list_defs(&team.id)?;
         out.push(TeamWithAgents { team, agents });
@@ -207,15 +230,20 @@ pub fn all_teams() -> Result<Vec<TeamWithAgents>> {
 
 /// Resolve an agent definition by id (built-in first, then the DB).
 pub fn resolve_def(id: &str) -> Result<Option<AgentDef>> {
+    let mut def = None;
+
+    // Check built-ins first
     if let Some(d) = builtin_teams()
         .into_iter()
         .flat_map(|t| t.agents)
         .find(|a| a.id == id)
     {
-        return Ok(Some(d));
+        def = Some(d);
     }
+
+    // Check DB for potential override or user agent
     let c = conn();
-    let def = c
+    let db_def = c
         .query_row(
             &format!("SELECT {DEF_COLS} FROM agent_defs WHERE id = ?1"),
             params![id],
@@ -223,6 +251,20 @@ pub fn resolve_def(id: &str) -> Result<Option<AgentDef>> {
         )
         .optional()
         .wrap_err("failed to query agent def")?;
+
+    if let Some(mut db_d) = db_def {
+        if let Some(ref mut b_d) = def {
+            // It's an override for a built-in
+            let id_save = b_d.id.clone();
+            *b_d = db_d;
+            b_d.id = id_save;
+            b_d.builtin = true;
+        } else {
+            // It's a user-defined agent
+            def = Some(db_d);
+        }
+    }
+
     Ok(def)
 }
 
@@ -330,12 +372,18 @@ pub fn add_def(team_id: &str, form: &DefForm) -> Result<AgentDef> {
 }
 
 pub fn update_def(id: &str, form: &DefForm) -> Result<()> {
-    if is_builtin_def(id) {
-        bail!("cannot modify a built-in agent");
-    }
     let now = chrono::Local::now().to_rfc3339();
-    let n = conn()
-        .execute(
+    let c = conn();
+    
+    // Check if it already exists in the DB
+    let exists: bool = c.query_row(
+        "SELECT 1 FROM agent_defs WHERE id = ?1",
+        params![id],
+        |_| Ok(true)
+    ).unwrap_or(false);
+
+    if exists {
+        c.execute(
             "UPDATE agent_defs SET
                 name = ?2, model = ?3, instructions = ?4, tools = ?5,
                 policy = ?6, memory_window = ?7, max_turns = ?8,
@@ -357,8 +405,35 @@ pub fn update_def(id: &str, form: &DefForm) -> Result<()> {
             ],
         )
         .wrap_err("failed to update agent def")?;
-    if n == 0 {
-        bail!("agent `{id}` not found");
+    } else {
+        // For built-ins that aren't in the DB yet, create an override record.
+        let team_id = if is_builtin_def(id) {
+            BUILTIN_TEAM_ID.to_string()
+        } else {
+            bail!("agent `{id}` not found");
+        };
+
+        c.execute(
+            "INSERT INTO agent_defs
+                (id, team_id, name, model, instructions, tools, policy, memory_window, max_turns, schedule_mins, task, task_hint, created, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
+            params![
+                id,
+                team_id,
+                form.name,
+                form.model,
+                form.instructions,
+                form.tools.join(","),
+                policy_to_str(form.policy),
+                form.memory_window.map(|n| n as i64),
+                form.max_turns.map(|n| n as i64),
+                form.schedule_mins.map(|n| n as i64),
+                form.task,
+                form.task_hint,
+                now,
+            ],
+        )
+        .wrap_err("failed to insert agent def override")?;
     }
     Ok(())
 }

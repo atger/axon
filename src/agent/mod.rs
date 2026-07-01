@@ -136,7 +136,7 @@ impl AgentLoop {
                         }
                     }
 
-                    let result = match self.tools.execute(&name, args) {
+                    let result = match self.tools.execute(&name, args).await {
                         Ok(r) => r,
                         Err(e) => format!("[tool error: {e}]"),
                     };

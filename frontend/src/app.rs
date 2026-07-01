@@ -19,6 +19,12 @@ pub struct LogLine {
 enum ViewTab {
     Agents,
     Tasks,
+    Settings,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SettingsOption {
+    MCP,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -48,6 +54,10 @@ struct State {
     ed_def: RwSignal<Option<AgentDef>>,
     raw_mode_def: RwSignal<bool>,
     spawn_task: RwSignal<String>,
+    mcp_servers: RwSignal<HashMap<String, api::McpServerConfig>>,
+    editing_mcp: RwSignal<bool>,
+    mcp_json_buffer: RwSignal<String>,
+    settings_opt: RwSignal<SettingsOption>,
     /// Completed cycles saved per agent so they remain visible even after
     /// cycle_started is updated on the next publish.
     prev_cycles: RwSignal<HashMap<String, Vec<(String, String, String)>>>,
@@ -108,6 +118,10 @@ pub fn App() -> impl IntoView {
         ed_def: RwSignal::new(None),
         raw_mode_def: RwSignal::new(false),
         spawn_task: RwSignal::new(String::new()),
+        mcp_servers: RwSignal::new(HashMap::new()),
+        editing_mcp: RwSignal::new(false),
+        mcp_json_buffer: RwSignal::new(String::new()),
+        settings_opt: RwSignal::new(SettingsOption::MCP),
         prev_cycles: RwSignal::new(HashMap::new()),
     };
 
@@ -115,6 +129,7 @@ pub fn App() -> impl IntoView {
         state.model.set(api::fetch_model().await);
         state.tasks.set(api::fetch_tasks().await);
         state.history.set(api::fetch_history().await);
+        state.mcp_servers.set(api::fetch_mcp().await);
         let teams = api::fetch_teams().await;
         if !teams.iter().any(|t| t.team.name == "custom") {
             let _ = api::create_team("custom").await;
@@ -146,11 +161,16 @@ pub fn App() -> impl IntoView {
                     "Model: " {move || state.model.get()}
                 </span>
                 <span class="spacer"></span>
-                <span id="conn" class="model">"● live"</span>
+                <button class="settings-btn" class:active=move || state.tab.get() == ViewTab::Settings
+                    on:click=move |_| { state.tab.set(ViewTab::Settings); } title="Settings">
+                    <span style="font-size: 13px; margin-right: 6px; font-weight: 500;">"Settings"</span>
+                    "⚙"
+                </button>
             </header>
             {move || match state.tab.get() {
                 ViewTab::Agents => agents_view(state).into_any(),
                 ViewTab::Tasks => tasks_view(state).into_any(),
+                ViewTab::Settings => settings_view(state).into_any(),
             }}
         </div>
     }
@@ -315,15 +335,13 @@ fn agents_view(state: State) -> impl IntoView {
                                 </div>
                                 <textarea class="md-edit" prop:value=move || state.ed_md.get()
                                     on:input=move |e| state.ed_md.set(event_target_value(&e))></textarea>
-                                {(!ro).then(|| view! {
-                                    <div class="row mt-sm">
-                                        <button on:click=move |_| { save(); }>"Save"</button>
-                                        {state.ed_def.get().map(|d| !d.id.is_empty()).unwrap_or(false).then(|| view! {
-                                            <button class="danger" on:click=del>"Delete"</button>
-                                        })}
-                                        <button on:click=move |_| { state.raw_mode_def.set(false); }>"Cancel"</button>
-                                    </div>
-                                })}
+                                <div class="row mt-sm">
+                                    <button on:click=move |_| { save(); }>"Save"</button>
+                                    {state.ed_def.get().map(|d| !d.id.is_empty() && !d.builtin).unwrap_or(false).then(|| view! {
+                                        <button class="danger" on:click=del>"Delete"</button>
+                                    })}
+                                    <button on:click=move |_| { state.raw_mode_def.set(false); }>"Cancel"</button>
+                                </div>
                             }.into_any()
                         } else {
                             view! {
@@ -334,7 +352,7 @@ fn agents_view(state: State) -> impl IntoView {
                                             let model_opt = if val == "default" { None } else { Some(val) };
                                             if let Some(mut def) = state.ed_def.get() {
                                                 let id = def.id.clone();
-                                                if !id.is_empty() && !ro {
+                                                if !id.is_empty() {
                                                     def.model = model_opt;
                                                     let def_clone = def.clone();
                                                     state.ed_def.set(Some(def_clone.clone()));
@@ -347,8 +365,7 @@ fn agents_view(state: State) -> impl IntoView {
                                             }
                                         }
                                         prop:value=move || state.ed_def.get().and_then(|d| d.model).unwrap_or_else(|| "default".to_string())
-                                        style="width: auto; max-width: 180px;"
-                                        disabled=ro>
+                                        style="width: auto; max-width: 180px;">
                                         <option value="default">"Default Model"</option>
                                         {move || state.models.get().into_iter().map(|m| {
                                             view! { <option value=m.clone()>{m.clone()}</option> }
@@ -372,7 +389,7 @@ fn agents_view(state: State) -> impl IntoView {
                                                         let mins = val.parse::<u64>().unwrap_or(0);
                                                         if let Some(mut def) = state.ed_def.get() {
                                                             let id = def.id.clone();
-                                                            if !id.is_empty() && !ro {
+                                                            if !id.is_empty() {
                                                                 def.schedule_mins = if mins > 0 { Some(mins) } else { None };
                                                                 let current_task = state.spawn_task.get();
                                                                 if !current_task.is_empty() {
@@ -389,8 +406,7 @@ fn agents_view(state: State) -> impl IntoView {
                                                         }
                                                     }
                                                     prop:value=move || state.ed_def.get().and_then(|d| d.schedule_mins).unwrap_or(0).to_string()
-                                                    style="width: auto; height: 40px;"
-                                                    disabled=ro>
+                                                    style="width: auto; height: 40px;">
                                                     <option value="0">"Manual"</option>
                                                     <option value="1">"1m"</option>
                                                     <option value="5">"5m"</option>
@@ -451,18 +467,17 @@ fn TimelineView(state: State) -> impl IntoView {
         let mut groups: Vec<(String, u64, Vec<api::AgentInfo>)> = Vec::new();
         for agent in agents.iter() {
             if let Some(def_name) = &agent.def_name {
-                if let Some(&mins) = def_map.get(def_name.as_str()) {
-                    let short = if agent.id.len() > 6 {
-                        &agent.id[..6]
-                    } else {
-                        &agent.id
-                    };
-                    groups.push((
-                        format!("{} ({})", def_name, short),
-                        mins,
-                        vec![agent.clone()],
-                    ));
-                }
+                let mins = def_map.get(def_name.as_str()).cloned().unwrap_or(0);
+                let short = if agent.id.len() > 6 {
+                    &agent.id[..6]
+                } else {
+                    &agent.id
+                };
+                groups.push((
+                    format!("{} ({})", def_name, short),
+                    mins,
+                    vec![agent.clone()],
+                ));
             }
         }
         groups.sort_by(|a, b| {
@@ -620,7 +635,28 @@ fn TimelineView(state: State) -> impl IntoView {
                         let win_start = now - wp;
                         let win_end = now + wf;
 
-                        if let Some(cs) = cs {
+                        let is_manual = interval_mins == 0;
+
+                        if is_manual {
+                            // Manual row: render a single bar spanning from its start time to complete (or now)
+                            if let Some(started) = agent_started {
+                                let bar_end = cycle_completed.unwrap_or(now);
+                                let x1 = t2x(started.max(win_start)).max(tx);
+                                let x2 = t2x(bar_end.min(win_end)).min(tx + tw);
+                                let w = (x2 - x1).max(2.0);
+                                if w >= 1.0 {
+                                    let (fill, op) = match status {
+                                        "error" => ("var(--red)", "0.7"),
+                                        "running" | "queued" => ("var(--accent)", "0.7"),
+                                        _ => ("var(--green)", "0.5"),
+                                    };
+                                    bars.push(view! {
+                                        <rect x={x1.to_string()} y={(y_center - 8.0).to_string()} width={w.to_string()} height="16" rx="4"
+                                            fill={fill} opacity={op} />
+                                    }.into_any());
+                                }
+                            }
+                        } else if let Some(cs) = cs {
                             let first_idx = ((win_start - cs) / interval_s).ceil() as i32;
                             let last_idx = ((win_end - cs) / interval_s).floor() as i32;
                             for idx in first_idx..=last_idx {
@@ -734,12 +770,18 @@ fn TimelineView(state: State) -> impl IntoView {
                             }.into_any()
                         });
 
+                        let is_manual = interval_mins == 0;
+                        let text_y_offset = if is_manual { 12.0 } else { 4.0 };
                         view! {
                             <g>
-                                <text x={LX.to_string()} y={(y_center + 4.0).to_string()} fill="var(--fg)" font-size="12" font-weight="bold">{label}</text>
-                                <text x={(LX + 4.0).to_string()} y={(y_center + 18.0).to_string()} fill="var(--muted)" font-size="9">{format!("⏲ {}m", interval_mins)}</text>
+                                <text x={LX.to_string()} y={(y_center + text_y_offset).to_string()} fill="var(--fg)" font-size="12" font-weight="bold">{label}</text>
+                                {if is_manual {
+                                    None
+                                } else {
+                                    Some(view! { <text x={(LX + 4.0).to_string()} y={(y_center + 18.0).to_string()} fill="var(--muted)" font-size="9">{format!("⏲ {}m", interval_mins)}</text> })
+                                }}
                                 {ags.first().map(|a| view! {
-                                    <text x={(LX + 4.0).to_string()} y={(y_center + 30.0).to_string()} fill="var(--muted)" font-size="9">{a.id.clone()}</text>
+                                    <text x={(LX + 4.0).to_string()} y={(y_center + if is_manual { 24.0 } else { 30.0 }).to_string()} fill="var(--muted)" font-size="9">{a.id.clone()}</text>
                                 })}
                                 <line x1={tx.to_string()} y1={y_center.to_string()} x2={(tx + tw).to_string()} y2={y_center.to_string()} stroke="var(--border)" stroke-width="1" opacity="0.3" />
                                 {bars.into_iter().collect_view()}
@@ -1459,5 +1501,253 @@ fn trunc(s: &str, n: usize) -> String {
         format!("{}…", s.chars().take(n).collect::<String>())
     } else {
         s.to_string()
+    }
+}
+
+// --------------------------------------------------------------------------
+// Settings view
+// --------------------------------------------------------------------------
+
+fn settings_view(state: State) -> impl IntoView {
+    view! {
+        <main>
+            <div class="left">
+                <div class="row toolbar">
+                    <h3 class="section">"SETTINGS"</h3>
+                </div>
+                <div class="agents">
+                    <div class=move || if state.settings_opt.get() == SettingsOption::MCP { "agent sel" } else { "agent" }
+                        style="cursor: pointer;"
+                        on:click=move |_| state.settings_opt.set(SettingsOption::MCP)>
+                        <div class="row">
+                            <span class="id">"MCP Servers"</span>
+                        </div>
+                        <div class="task">"Configure external tool integrations"</div>
+                    </div>
+                </div>
+            </div>
+            <div class="right">
+                {move || match state.settings_opt.get() {
+                    SettingsOption::MCP => mcp_settings_pane(state).into_any(),
+                }}
+            </div>
+        </main>
+    }
+}
+
+fn mcp_settings_pane(state: State) -> impl IntoView {
+    let (status_msg, set_status_msg) = RwSignal::new(String::new()).split();
+
+    let start_edit = move |_| {
+        let servers = state.mcp_servers.get_untracked();
+        let json = serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": servers }))
+            .unwrap_or_else(|_| "{}".to_string());
+        state.mcp_json_buffer.set(json);
+        state.editing_mcp.set(true);
+        set_status_msg.set(String::new());
+    };
+
+    let cancel_edit = move |_| {
+        state.editing_mcp.set(false);
+        set_status_msg.set(String::new());
+    };
+
+    let save_json = move |_| {
+        let raw = state.mcp_json_buffer.get_untracked();
+        let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                set_status_msg.set(format!("Error: Invalid JSON ({})", e));
+                return;
+            }
+        };
+
+        let servers_val = if let Some(s) = parsed.get("mcpServers") {
+            s.clone()
+        } else {
+            parsed
+        };
+
+        let servers: HashMap<String, api::McpServerConfig> = match serde_json::from_value(servers_val) {
+            Ok(s) => s,
+            Err(e) => {
+                set_status_msg.set(format!("Error: Invalid MCP server format ({})", e));
+                return;
+            }
+        };
+
+        spawn_local(async move {
+            match api::replace_all_mcp(servers).await {
+                Ok(_) => {
+                    state.mcp_servers.set(api::fetch_mcp().await);
+                    state.editing_mcp.set(false);
+                    set_status_msg.set("Configuration saved successfully".to_string());
+                }
+                Err(e) => {
+                    set_status_msg.set(format!("Error saving configuration: {}", e));
+                }
+            }
+        });
+    };
+
+    view! {
+        <div class="config-panels" style="padding: 20px;">
+            <div class="row toolbar" style="margin-bottom: 20px; padding: 0;">
+                <h3 style="margin: 0;">"MCP Servers"</h3>
+                <span class="spacer"></span>
+                {move || if state.editing_mcp.get() {
+                    view! {
+                        <button class="btn-accept" on:click=save_json>"Save Changes"</button>
+                        <button style="margin-left: 8px;" on:click=cancel_edit>"Cancel"</button>
+                    }.into_any()
+                } else {
+                    view! {
+                        <button on:click=start_edit>"Edit JSON"</button>
+                    }.into_any()
+                }}
+            </div>
+
+            {move || {
+                let msg = status_msg.get();
+                if msg.is_empty() { return None; }
+                let is_err = msg.to_lowercase().contains("error");
+                Some(view! {
+                    <div class="status-box" style=format!("margin-bottom: 20px; padding: 12px; border-radius: 6px; border: 1px solid {}; background: {}; color: {}; font-size: 13px;",
+                        if is_err { "var(--red)" } else { "var(--green)" },
+                        if is_err { "#400" } else { "#040" },
+                        if is_err { "#faa" } else { "#afa" })>
+                        {msg}
+                    </div>
+                })
+            }}
+
+            {move || if state.editing_mcp.get() {
+                view! {
+                    <div class="spawn-section" style="border: 1px solid var(--border); padding: 16px; border-radius: 8px;">
+                        <p style="font-size: 12px; color: var(--muted); margin-bottom: 12px;">
+                            "Modify your MCP servers directly. Format follows the Claude Desktop configuration."
+                        </p>
+                        <div class="field">
+                            <textarea 
+                                style="min-height: 500px; font-family: monospace; font-size: 13px; line-height: 1.4; background: #111;"
+                                prop:value=move || state.mcp_json_buffer.get()
+                                on:input=move |e| state.mcp_json_buffer.set(event_target_value(&e))></textarea>
+                        </div>
+                    </div>
+                }.into_any()
+            } else {
+                let servers = state.mcp_servers.get();
+                if servers.is_empty() {
+                    view! { <div class="muted placeholder">"No MCP servers configured. Click 'Edit JSON' to add one."</div> }.into_any()
+                } else {
+                    let mut sorted: Vec<_> = servers.into_iter().collect();
+                    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                    view! {
+                        <div class="mcp-grid" style="display: flex; flex-direction: column; gap: 16px;">
+                            {sorted.into_iter().map(|(id, cfg)| mcp_server_card(state, id, cfg)).collect_view()}
+                        </div>
+                    }.into_any()
+                }
+            }}
+        </div>
+    }
+}
+
+fn mcp_server_card(state: State, id: String, cfg: api::McpServerConfig) -> impl IntoView {
+    let (show_env, set_show_env) = RwSignal::new(false).split();
+    let (env_key, set_env_key) = RwSignal::new(String::new()).split();
+    let (env_val, set_env_val) = RwSignal::new(String::new()).split();
+
+    let id_del = id.clone();
+    let delete_server = move |ev: leptos::ev::MouseEvent| {
+        ev.stop_propagation();
+        let id = id_del.clone();
+        spawn_local(async move {
+            let _ = api::delete_mcp(&id).await;
+            state.mcp_servers.set(api::fetch_mcp().await);
+        });
+    };
+
+    view! {
+        <div class="agent" style="height: auto; padding-bottom: 12px;" on:click=move |_| set_show_env.update(|v| *v = !*v)>
+            <div class="row">
+                <span class="id" style="font-weight: bold; color: var(--accent);">{id.clone()}</span>
+                <span class="spacer"></span>
+                <button class="danger btn-small" on:click=delete_server>"remove"</button>
+            </div>
+            <div class="task" style="font-family: monospace; font-size: 11px;">
+                {cfg.command.clone()} " " {cfg.args.join(" ")}
+            </div>
+            {
+                let id = id.clone();
+                let cfg = cfg.clone();
+                move || show_env.get().then(|| {
+                    let id_add = id.clone();
+                    let cfg_add = cfg.clone();
+                    let add_env = move |_| {
+                        let key = env_key.get_untracked().trim().to_string();
+                        let val = env_val.get_untracked().trim().to_string();
+                        if key.is_empty() {
+                            return;
+                        }
+                        let mut new_cfg = cfg_add.clone();
+                        new_cfg.env.insert(key, val);
+                        let id = id_add.clone();
+                        spawn_local(async move {
+                            let _ = api::upsert_mcp(&id, &new_cfg.command, new_cfg.args, new_cfg.env).await;
+                            state.mcp_servers.set(api::fetch_mcp().await);
+                            set_env_key.set(String::new());
+                            set_env_val.set(String::new());
+                        });
+                    };
+
+                    let id_list = id.clone();
+                    let cfg_list = cfg.clone();
+                    view! {
+                        <div class="mcp-env-section" style="margin-top: 12px; border-top: 1px solid var(--border); padding-top: 12px;" on:click=move |ev| ev.stop_propagation()>
+                            <h5 style="margin: 0 0 8px 0; font-size: 11px; text-transform: uppercase; color: var(--muted);">"Environment Variables / Secrets"</h5>
+                            <div class="env-list">
+                                {
+                                    let id_list = id_list.clone();
+                                    let cfg_list = cfg_list.clone();
+                                    cfg_list.env.clone().into_iter().map(move |(k, v)| {
+                                        let k_del = k.clone();
+                                        let id_del = id_list.clone();
+                                        let cfg_del = cfg_list.clone();
+                                        view! {
+                                            <div class="row env-row" style="margin-bottom: 4px; font-size: 12px;">
+                                                <span style="font-family: monospace; color: var(--muted);">{k.clone()}</span>
+                                                <span style="margin: 0 8px;">"="</span>
+                                                <span style="font-family: monospace; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                                                    {if v.is_empty() { "(empty)" } else { "********" }}
+                                                </span>
+                                                <button class="danger btn-small" style="padding: 2px 6px;" on:click=move |_| {
+                                                    let mut new_cfg = cfg_del.clone();
+                                                    new_cfg.env.remove(&k_del);
+                                                    let id = id_del.clone();
+                                                    spawn_local(async move {
+                                                        let _ = api::upsert_mcp(&id, &new_cfg.command, new_cfg.args, new_cfg.env).await;
+                                                        state.mcp_servers.set(api::fetch_mcp().await);
+                                                    });
+                                                }>"×"</button>
+                                            </div>
+                                        }
+                                    }).collect_view()
+                                }
+                            </div>
+                            <div class="row mt-sm" style="gap: 4px;">
+                                <input type="text" placeholder="KEY" style="flex: 1; height: 28px; font-size: 11px;"
+                                    prop:value=move || env_key.get()
+                                    on:input=move |e| set_env_key.set(event_target_value(&e)) />
+                                <input type="password" placeholder="Value" style="flex: 1; height: 28px; font-size: 11px;"
+                                    prop:value=move || env_val.get()
+                                    on:input=move |e| set_env_val.set(event_target_value(&e)) />
+                                <button class="btn-small" style="height: 28px;" on:click=add_env>"Add"</button>
+                            </div>
+                        </div>
+                    }
+                })
+            }
+        </div>
     }
 }

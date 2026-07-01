@@ -19,7 +19,7 @@ use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::swarm::SpawnCmd;
-use crate::swarm::tools::{AddTaskTool, RunCommandTool, SpawnAgentTool, WebSearchTool};
+use crate::swarm::tools::{AddTaskTool, RunCommandTool, SpawnAgentTool, WebSearchTool, SharedTool};
 
 /// Approval policy for generic, user-spawned `Coder` agents (the built-in
 /// pipeline roles are constrained by their toolset instead, and run AutoApprove).
@@ -168,11 +168,17 @@ pub struct CodingAgent {
     /// Channel for the `spawn_agent` tool (proactive agents delegate through it).
     /// `None` ⇒ the agent cannot spawn others.
     spawn_tx: Option<UnboundedSender<SpawnCmd>>,
+    mcp_tools: Vec<Arc<dyn ToolT>>,
 }
 
 impl CodingAgent {
     /// A built-in agent: prompt + tools fixed by role.
-    pub fn with_role(name: impl Into<String>, role: Role, control: Arc<AgentControl>) -> Self {
+    pub fn with_role(
+        name: impl Into<String>,
+        role: Role,
+        control: Arc<AgentControl>,
+        mcp_tools: Vec<Arc<dyn ToolT>>,
+    ) -> Self {
         let prompt = CODER_PROMPT.to_string();
         Self {
             name: name.into(),
@@ -181,6 +187,7 @@ impl CodingAgent {
             prompt,
             allowed_tools: None,
             spawn_tx: None,
+            mcp_tools,
         }
     }
 
@@ -192,6 +199,7 @@ impl CodingAgent {
         prompt: String,
         allowed_tools: Option<Vec<String>>,
         spawn_tx: Option<UnboundedSender<SpawnCmd>>,
+        mcp_tools: Vec<Arc<dyn ToolT>>,
     ) -> Self {
         Self {
             name: name.into(),
@@ -200,6 +208,7 @@ impl CodingAgent {
             prompt,
             allowed_tools,
             spawn_tx,
+            mcp_tools,
         }
     }
 }
@@ -239,6 +248,18 @@ impl AgentDeriveT for CodingAgent {
         if let Some(tx) = &self.spawn_tx {
             all.push(Box::new(SpawnAgentTool { tx: tx.clone() }));
         }
+
+        // Add MCP tools
+        for mcp in &self.mcp_tools {
+            // We need to clone the dynamic tool.
+            // Since we can't easily clone dyn ToolT, we rely on the fact that
+            // our McpSwarmTool could be designed to be shared or cloned.
+            // Actually, we can just wrap it in a pointer.
+            // But ToolT implementation requires it to be a trait object.
+            // I'll make a wrapper that holds Arc<dyn ToolT>.
+            all.push(Box::new(SharedTool::new(mcp.clone())));
+        }
+
         match &self.allowed_tools {
             // Keep read-only tools always; otherwise honor the allow-list.
             Some(allowed) => all

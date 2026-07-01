@@ -3,15 +3,84 @@
 //! the legacy `crate::tools::{shell, web}` implementations.
 
 use autoagents::async_trait;
-use autoagents::core::tool::{ToolCallError, ToolInputT, ToolRuntime, ToolT};
+use autoagents::core::tool::{ToolCallError, ToolRuntime, ToolT, ToolInputT};
 use autoagents_derive::{ToolInput, tool};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
+use std::sync::Arc;
 
 use crate::swarm::SpawnCmd;
 use crate::swarm::store;
+use crate::tools::mcp::McpTool;
+
+#[derive(Debug)]
+pub struct McpSwarmTool {
+    inner: McpTool,
+}
+
+impl McpSwarmTool {
+    pub fn new(inner: McpTool) -> Self {
+        Self { inner }
+    }
+}
+
+impl ToolT for McpSwarmTool {
+    fn name(&self) -> &str {
+        crate::tools::Tool::name(&self.inner)
+    }
+
+    fn description(&self) -> &str {
+        crate::tools::Tool::description(&self.inner)
+    }
+
+    fn args_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": true
+        })
+    }
+}
+
+#[async_trait]
+impl ToolRuntime for McpSwarmTool {
+    async fn execute(&self, args: Value) -> Result<Value, ToolCallError> {
+        crate::tools::Tool::execute(&self.inner, args).await
+            .map(|s| Value::String(s))
+            .map_err(|e| ToolCallError::RuntimeError(e.to_string().into()))
+    }
+}
+
+#[derive(Debug)]
+pub struct SharedTool {
+    inner: Arc<dyn ToolT>,
+}
+
+impl SharedTool {
+    pub fn new(inner: Arc<dyn ToolT>) -> Self {
+        Self { inner }
+    }
+}
+
+impl ToolT for SharedTool {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+    fn args_schema(&self) -> Value {
+        self.inner.args_schema()
+    }
+}
+
+#[async_trait]
+impl ToolRuntime for SharedTool {
+    async fn execute(&self, args: Value) -> Result<Value, ToolCallError> {
+        self.inner.execute(args).await
+    }
+}
 
 #[derive(Serialize, Deserialize, ToolInput, Debug)]
 pub struct AddTaskArgs {

@@ -1,6 +1,6 @@
-use std::process::Command;
-
+use async_trait::async_trait;
 use serde_json::Value;
+use tokio::process::Command;
 
 use super::{Tool, ToolError};
 
@@ -42,6 +42,7 @@ fn is_safe_command(cmd: &str) -> bool {
 
 pub struct RunCommandTool;
 
+#[async_trait]
 impl Tool for RunCommandTool {
     fn name(&self) -> &str {
         "run_command"
@@ -60,7 +61,7 @@ impl Tool for RunCommandTool {
         !is_safe_command(cmd)
     }
 
-    fn execute(&self, args: Value) -> Result<String, ToolError> {
+    async fn execute(&self, args: Value) -> Result<String, ToolError> {
         let cmd = args["cmd"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'cmd'".into()))?;
@@ -69,6 +70,7 @@ impl Tool for RunCommandTool {
             .arg("-c")
             .arg(cmd)
             .output()
+            .await
             .map_err(ToolError::Io)?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);

@@ -15,7 +15,7 @@ use axum::{
     },
     http::{StatusCode, Uri, header},
     response::{Html, IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post, put, delete},
 };
 
 mod tasks;
@@ -44,6 +44,8 @@ pub async fn run_server(swarm: Arc<Swarm>, host: String, port: u16) -> Result<()
         .route("/api/agent-defs/:id", put(teams::update_def).delete(teams::delete_def))
         .route("/api/agent-defs/generate", post(teams::generate_def))
         .route("/api/models", get(list_models).post(set_model))
+        .route("/api/mcp", get(list_mcp).post(upsert_mcp).put(replace_all_mcp))
+        .route("/api/mcp/:id", delete(delete_mcp))
         .route("/api/tasks", get(tasks::list))
         .route("/api/tasks/history", get(tasks::history))
         .route("/api/tasks/:id", get(tasks::get).put(tasks::update))
@@ -163,6 +165,74 @@ async fn set_model(
         return (StatusCode::BAD_REQUEST, "model must not be empty").into_response();
     }
     match swarm.set_model(&req.model).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn list_mcp() -> Json<serde_json::Value> {
+    let config = crate::config::AxonConfig::load();
+    Json(json!(config.mcp_servers))
+}
+
+#[derive(Deserialize)]
+struct UpsertMcpReq {
+    id: String,
+    command: String,
+    args: Vec<String>,
+    #[serde(default)]
+    env: std::collections::HashMap<String, String>,
+}
+
+async fn upsert_mcp(Json(req): Json<UpsertMcpReq>) -> Response {
+    if req.id.trim().is_empty() || req.command.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, "id and command must not be empty").into_response();
+    }
+    let mut config = crate::config::AxonConfig::load();
+    config.mcp_servers.insert(
+        req.id,
+        crate::config::McpServerConfig {
+            command: req.command,
+            args: req.args,
+            env: req.env,
+        },
+    );
+    match config.save() {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_mcp(Path(id): Path<String>) -> Response {
+    let mut config = crate::config::AxonConfig::load();
+    if config.mcp_servers.remove(&id).is_some() {
+        match config.save() {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e.to_string() })),
+            )
+                .into_response(),
+        }
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
+async fn replace_all_mcp(
+    Json(servers): Json<std::collections::HashMap<String, crate::config::McpServerConfig>>,
+) -> Response {
+    let mut config = crate::config::AxonConfig::load();
+    config.mcp_servers = servers;
+    match config.save() {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,

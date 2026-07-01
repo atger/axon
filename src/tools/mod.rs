@@ -1,7 +1,10 @@
 pub mod fs;
+pub mod mcp;
 pub mod shell;
 pub mod web;
 
+use std::sync::Arc;
+use async_trait::async_trait;
 use serde_json::Value;
 
 #[derive(thiserror::Error, Debug)]
@@ -16,6 +19,7 @@ pub enum ToolError {
     CommandFailed(String),
 }
 
+#[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
@@ -27,7 +31,7 @@ pub trait Tool: Send + Sync {
     fn needs_confirm(&self, _args: &Value) -> bool {
         self.is_destructive()
     }
-    fn execute(&self, args: Value) -> Result<String, ToolError>;
+    async fn execute(&self, args: Value) -> Result<String, ToolError>;
 }
 
 pub struct ToolRegistry {
@@ -39,7 +43,7 @@ impl ToolRegistry {
         Self { tools: Vec::new() }
     }
 
-    pub fn with_defaults() -> Self {
+    pub async fn with_defaults() -> Self {
         Self::new()
             .register(Box::new(fs::ReadFileTool))
             .register(Box::new(fs::WriteFileTool))
@@ -47,8 +51,30 @@ impl ToolRegistry {
             .register(Box::new(web::WebSearchTool))
     }
 
+    pub async fn from_config(config: &crate::config::AxonConfig) -> (Self, Vec<Arc<rust_mcp_sdk::mcp_client::ClientRuntime>>) {
+        let mut registry = Self::with_defaults().await;
+        let mut clients = Vec::new();
+        for (name, server) in &config.mcp_servers {
+            match mcp::load_mcp_tools(name, &server.command, &server.args, &server.env).await {
+                Ok((tools, client)) => {
+                    registry = registry.register_many(tools);
+                    clients.push(client);
+                }
+                Err(e) => {
+                    eprintln!("Warning: failed to load MCP tools for {name}: {e}");
+                }
+            }
+        }
+        (registry, clients)
+    }
+
     pub fn register(mut self, tool: Box<dyn Tool>) -> Self {
         self.tools.push(tool);
+        self
+    }
+
+    pub fn register_many(mut self, tools: Vec<Box<dyn Tool>>) -> Self {
+        self.tools.extend(tools);
         self
     }
 
@@ -59,9 +85,9 @@ impl ToolRegistry {
             .is_some_and(|t| t.needs_confirm(args))
     }
 
-    pub fn execute(&self, name: &str, args: Value) -> Result<String, ToolError> {
+    pub async fn execute(&self, name: &str, args: Value) -> Result<String, ToolError> {
         match self.tools.iter().find(|t| t.name() == name) {
-            Some(tool) => tool.execute(args),
+            Some(tool) => tool.execute(args).await,
             None => Err(ToolError::UnknownTool(name.to_string())),
         }
     }

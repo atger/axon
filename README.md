@@ -17,6 +17,7 @@ Most AI coding tools require large cloud-hosted models and a constant internet c
 - **Model-size aware** — prompt construction adapts to available context window (small models get tighter, focused prompts)
 - **Offline capable** — fully functional without any network access once models are downloaded
 - **Multi-model** — switch between models mid-session without restarting
+- **MCP support** — extensible tool system via Model Context Protocol; integrates with GitHub, Google, and more.
 
 ## Tech Stack
 
@@ -84,6 +85,20 @@ Contributions are welcome. A few things to keep in mind:
 - Changes that break compatibility with 1B models are not accepted
 - The UI must remain usable over SSH on an 80-column terminal
 - No runtime dependencies on cloud services — the binary must work fully offline
+
+## Model Context Protocol (MCP)
+
+Axon supports [MCP](https://modelcontextprotocol.io/), allowing it to use a wide variety of external tools. By default, it includes configurations for GitHub and Google Search.
+
+To configure MCP servers, edit `~/.axon/config.toml`:
+
+```toml
+[mcp_servers]
+github = { command = "npx", args = ["-y", "@modelcontextprotocol/server-github"] }
+google = { command = "npx", args = ["-y", "@modelcontextprotocol/server-google-search"] }
+```
+
+> **Note:** Many MCP servers require environment variables for authentication (e.g., `GITHUB_PERSONAL_ACCESS_TOKEN`). Set these in your shell before running Axon.
 
 ## License
 
