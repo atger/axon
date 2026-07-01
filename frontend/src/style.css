@@ -50,11 +50,17 @@ button:hover { border-color:var(--accent); }
 button.danger:hover { border-color:var(--red); color:var(--red); }
 main { flex:1; min-height:0; display:grid; grid-template-columns: minmax(260px, 380px) 1fr; overflow:hidden; }
 .left { border-right:1px solid var(--border); overflow-y:auto; padding:var(--size-4); }
-.right { display:flex; flex-direction:column; min-height:0; overflow-y:auto; padding:var(--size-4); }
+.right {
+  display:flex;
+  flex-direction:column;
+  min-height:0;
+  overflow-y:hidden;
+  padding:var(--size-4);
+}
 .right > .split,
 .right > .md-preview,
 .right > .md-edit,
-.right > .timeline-wrap { flex:1; min-height:0; }
+.right > .timeline-wrap { flex:1; min-width:0; min-height:0; }
 textarea, select { width:100%; background:var(--bg); color:var(--fg); border:1px solid var(--border); border-radius:var(--radius-2); padding:var(--size-2); font:inherit; }
 textarea { resize:vertical; min-height:64px; }
 .field { margin-bottom:10px; }
@@ -79,9 +85,66 @@ nav { display:flex; gap:6px; }
 nav button.active { border-color:var(--accent); color:var(--accent); }
 .md-edit { width:100%; resize:none; }
 .title-edit { width:100%; }
-.md-preview { overflow-y:auto; border:1px solid var(--border); border-radius:var(--radius-2); padding:14px; background:var(--panel); }
+.md-preview {
+  display: block;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2);
+  padding: 14px;
+  background: var(--panel);
+  width: 100%;
+  box-sizing: border-box;
+}
+.md-preview > .agent-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 16px;
+  width: 100%;
+  box-sizing: border-box;
+}
+.md-body {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  color: var(--fg);
+  line-height: 1.6;
+  box-sizing: border-box;
+}
+.md-body * {
+  max-width: none !important;
+  max-inline-size: none !important;
+}
+.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body p, .md-body ul, .md-body ol, .md-body pre, .md-body table, .md-body blockquote {
+  display: block;
+  width: 100% !important;
+  align-self: stretch;
+  box-sizing: border-box;
+  margin-left: 0;
+  margin-right: 0;
+  margin-top: 0;
+  margin-bottom: 16px;
+}
+.md-body > *:last-child {
+  margin-bottom: 0;
+}
+.md-body h1, .md-body h2, .md-body h3, .md-body h4 { font-weight: 600; line-height: 1.25; color: var(--accent); }
+.md-body h1 { font-size: 2em; border-bottom: 1px solid var(--border); padding-bottom: .3em; margin-top: 24px; }
+.md-body h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: .3em; margin-top: 24px; }
+.md-body a { color: var(--accent); text-decoration: none; }
+.md-body a:hover { text-decoration: underline; }
+.md-body ul, .md-body ol { padding-left: 2em; list-style-position: outside; }
+.md-body li { width: 100%; margin-bottom: 0.25em; }
+.md-body li > p { margin-bottom: 8px; }
+.md-body blockquote { border-left: 4px solid var(--border); padding: 0 1em; color: var(--muted); }
+.md-body table { border-collapse: collapse; display: table; table-layout: auto; }
+.md-body th, .md-body td { border: 1px solid var(--border); padding: 6px 13px; text-align: left; }
+.md-body th { background: var(--panel); font-weight: 600; }
+.md-body pre { overflow-x: auto; white-space: pre; background: var(--pre-bg); padding: 16px; border-radius: var(--radius-2); }
+.md-body code { padding: .2em .4em; margin: 0; font-size: 85%; background: var(--pre-bg); border-radius: var(--radius-1); font-family: inherit; }
+.md-body pre code { padding: 0; margin: 0; font-size: 100%; background: transparent; border-radius: 0; display: block; width: 100%; }
 .md-preview h1,.md-preview h2,.md-preview h3 { color:var(--accent); }
-.md-preview pre { background:var(--pre-bg); padding:var(--size-2); border-radius:var(--radius-2); overflow-x:auto; }
 .agent-meta { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:12px; padding:10px; border:1px solid var(--border); border-radius:var(--radius-2); background:var(--bg); font-size:12px; }
 .agent-meta .meta-name { font-weight:var(--font-weight-7); font-size:14px; color:var(--accent); }
 .agent-meta .meta-badge { color:var(--muted); padding:2px 6px; border:1px solid var(--border); border-radius:var(--radius-1); }
