@@ -111,12 +111,13 @@ nav button.active { border-color:var(--accent); color:var(--accent); }
   color: var(--fg);
   line-height: 1.6;
   box-sizing: border-box;
+  font-size: 14px;
 }
 .md-body * {
   max-width: none !important;
   max-inline-size: none !important;
 }
-.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body p, .md-body ul, .md-body ol, .md-body pre, .md-body table, .md-body blockquote {
+.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6, .md-body p, .md-body ul, .md-body ol, .md-body pre, .md-body table, .md-body blockquote {
   display: block;
   width: 100% !important;
   align-self: stretch;
@@ -129,9 +130,14 @@ nav button.active { border-color:var(--accent); color:var(--accent); }
 .md-body > *:last-child {
   margin-bottom: 0;
 }
-.md-body h1, .md-body h2, .md-body h3, .md-body h4 { font-weight: 600; line-height: 1.25; color: var(--accent); }
+.md-body h1, .md-body h2, .md-body h3, .md-body h4, .md-body h5, .md-body h6 { font-weight: 600; line-height: 1.25; color: var(--accent); }
 .md-body h1 { font-size: 2em; border-bottom: 1px solid var(--border); padding-bottom: .3em; margin-top: 24px; }
 .md-body h2 { font-size: 1.5em; border-bottom: 1px solid var(--border); padding-bottom: .3em; margin-top: 24px; }
+.md-body h3 { font-size: 1.25em; margin-top: 24px; }
+.md-body h4 { font-size: 1em; margin-top: 24px; }
+.md-body h5 { font-size: 0.875em; margin-top: 24px; }
+.md-body h6 { font-size: 0.85em; margin-top: 24px; color: var(--muted); }
+.md-body p, .md-body ul, .md-body ol { font-size: 1em; }
 .md-body a { color: var(--accent); text-decoration: none; }
 .md-body a:hover { text-decoration: underline; }
 .md-body ul, .md-body ol { padding-left: 2em; list-style-position: outside; }
