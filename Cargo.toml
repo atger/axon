@@ -21,7 +21,7 @@ thiserror = "2.0.18"
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 tui-textarea = "0.7.0"
 llama-cpp-2 = "0.1"
-hf-hub = "0.3"
+hf-hub = "0.5"
 encoding_rs = "0.8"
 toml = "0.8"
 ureq = { version = "2", features = ["json"] }
