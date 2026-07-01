@@ -132,42 +132,44 @@ pub fn App() -> impl IntoView {
     api::connect_ws(move |ev: SwarmEvent| handle_event(state, ev));
 
     view! {
-        <header>
-            <h1>"axon swarm"</h1>
-            <nav>
-                <button class:active=move || state.tab.get() == ViewTab::Tasks
-                    on:click=move |_| { state.tab.set(ViewTab::Tasks); state.refresh_tasks(); }>
-                    "Tasks"</button>
-                <button class:active=move || state.tab.get() == ViewTab::Agents
-                    on:click=move |_| { state.tab.set(ViewTab::Agents); state.editing_def.set(false); state.selected.set(None); }>"Agents"</button>
-            </nav>
-            <select class="model-select"
-                on:change=move |ev| {
-                    let name = event_target_value(&ev);
-                    if !name.is_empty() {
-                        let st = state;
-                        spawn_local(async move {
-                            let _ = api::set_model(&name).await;
-                            st.model.set(name);
-                        });
+        <div class="app-shell">
+            <header>
+                <h1>"axon swarm"</h1>
+                <nav>
+                    <button class:active=move || state.tab.get() == ViewTab::Tasks
+                        on:click=move |_| { state.tab.set(ViewTab::Tasks); state.refresh_tasks(); }>
+                        "Tasks"</button>
+                    <button class:active=move || state.tab.get() == ViewTab::Agents
+                        on:click=move |_| { state.tab.set(ViewTab::Agents); state.editing_def.set(false); state.selected.set(None); }>"Agents"</button>
+                </nav>
+                <select class="model-select"
+                    on:change=move |ev| {
+                        let name = event_target_value(&ev);
+                        if !name.is_empty() {
+                            let st = state;
+                            spawn_local(async move {
+                                let _ = api::set_model(&name).await;
+                                st.model.set(name);
+                            });
+                        }
                     }
-                }
-                prop:value=move || state.model.get()>
-                <option value="" disabled>"— select model —"</option>
-                {move || state.models.get().into_iter().map(|m| {
-                    let is_current = m == state.model.get();
-                    view! {
-                        <option value=m.clone() selected=is_current>{m.clone()}</option>
-                    }
-                }).collect_view()}
-            </select>
-            <span class="spacer"></span>
-            <span id="conn" class="model">"● live"</span>
-        </header>
-        {move || match state.tab.get() {
-            ViewTab::Agents => agents_view(state).into_any(),
-            ViewTab::Tasks => tasks_view(state).into_any(),
-        }}
+                    prop:value=move || state.model.get()>
+                    <option value="" disabled>"— select model —"</option>
+                    {move || state.models.get().into_iter().map(|m| {
+                        let is_current = m == state.model.get();
+                        view! {
+                            <option value=m.clone() selected=is_current>{m.clone()}</option>
+                        }
+                    }).collect_view()}
+                </select>
+                <span class="spacer"></span>
+                <span id="conn" class="model">"● live"</span>
+            </header>
+            {move || match state.tab.get() {
+                ViewTab::Agents => agents_view(state).into_any(),
+                ViewTab::Tasks => tasks_view(state).into_any(),
+            }}
+        </div>
     }
 }
 
@@ -247,8 +249,8 @@ fn agents_view(state: State) -> impl IntoView {
     view! {
         <main>
             <div class="left">
-                <div class="row" style="margin:0 0 8px">
-                    <h3 class="section" style="margin:0">"AGENTS"</h3>
+                <div class="row toolbar">
+                    <h3 class="section">"AGENTS"</h3>
                     <span class="spacer"></span>
                     <button class="danger"
                         on:click=move |_| spawn_local(async { api::cancel_all().await; })>
@@ -319,8 +321,8 @@ fn agents_view(state: State) -> impl IntoView {
                         let name = state.ed_def.get().as_ref().map(|d| d.name.as_str()).unwrap_or("agent").to_string();
                         if state.raw_mode_def.get() {
                             view! {
-                                <div class="row" style="margin-bottom:8px">
-                                    <h3 style="margin:0">{name.clone()}</h3>
+                                <div class="row toolbar">
+                                    <h3>{name.clone()}</h3>
                                     <span class="spacer"></span>
                                     {ro.then(|| view! { <span class="badge sys">"read-only"</span> })}
                                     <button on:click=move |_| state.raw_mode_def.set(false)>"view"</button>
@@ -329,7 +331,7 @@ fn agents_view(state: State) -> impl IntoView {
                                 <textarea class="md-edit" prop:value=move || state.ed_md.get()
                                     on:input=move |e| state.ed_md.set(event_target_value(&e))></textarea>
                                 {(!ro).then(|| view! {
-                                    <div class="row" style="margin-top:8px">
+                                    <div class="row mt-sm">
                                         <button on:click=move |_| { save(); }>"Save"</button>
                                         <button on:click=move |_| { state.raw_mode_def.set(false); state.editing_def.set(false); }>"Cancel"</button>
                                     </div>
@@ -337,14 +339,14 @@ fn agents_view(state: State) -> impl IntoView {
                             }.into_any()
                         } else {
                             view! {
-                                <div class="row" style="margin-bottom:8px">
-                                    <h3 style="margin:0">{name.clone()}</h3>
+                                <div class="row toolbar">
+                                    <h3>{name.clone()}</h3>
                                     <span class="spacer"></span>
                                     {ro.then(|| view! { <span class="badge sys">"read-only"</span> })}
                                     <button on:click=move |_| state.raw_mode_def.set(true)>"edit"</button>
                                     <button on:click=move |_| { state.editing_def.set(false); }>"Close"</button>
                                 </div>
-                                <div class="md-preview" style="height:calc(100vh - 230px)" inner_html=move || render_agent_md(&state.ed_md.get())></div>
+                                <div class="md-preview" inner_html=move || render_agent_md(&state.ed_md.get())></div>
                                 <div class="spawn-section">
                                     {(!ro).then(|| view! {
                                         <div class="row">
@@ -354,11 +356,11 @@ fn agents_view(state: State) -> impl IntoView {
                                             })}
                                         </div>
                                     })}
-                                    <div class="field" style="margin-top:8px">
+                                    <div class="field mt-sm">
                                         <textarea node_ref=spawn_input
                                             on:input=move |e| state.spawn_task.set(event_target_value(&e))
                                             placeholder=move || state.ed_def.get().and_then(|d| d.task_hint.clone()).unwrap_or_else(|| "Describe a task for this agent…".to_string())></textarea>
-                                        <button style="margin-top:4px" on:click=do_spawn>"Spawn"</button>
+                                        <button class="mt-sm" on:click=do_spawn>"Spawn"</button>
                                     </div>
                                 </div>
                             }.into_any()
@@ -375,13 +377,20 @@ fn agents_view(state: State) -> impl IntoView {
 #[component]
 fn TimelineView(state: State) -> impl IntoView {
     const LX: f64 = 5.0;
-    const TX: f64 = 140.0;
-    const TW: f64 = 740.0;
     const RH: f64 = 48.0;
     const HH: f64 = 40.0;
     const ZOOM_LEVELS: &[f64] = &[1200.0, 2400.0, 3600.0, 7200.0, 14400.0, 28800.0, 86400.0];
 
     let zoom_idx = RwSignal::new(1i32);
+    let wrap_ref: NodeRef<leptos::html::Div> = NodeRef::new();
+    let svg_w = RwSignal::new(900.0f64);
+
+    Effect::new(move |_| {
+        if let Some(el) = wrap_ref.get() {
+            let w = (el.client_width() as f64).max(600.0);
+            svg_w.set(w);
+        }
+    });
 
     let rows = move || -> Vec<(String, u64, Vec<api::AgentInfo>)> {
         let agents = state.agents.get();
@@ -430,10 +439,11 @@ fn TimelineView(state: State) -> impl IntoView {
 
     let view_box = move || {
         let n = nrows();
+        let w = svg_w.get();
         if n == 0 {
-            "0 0 900 200".to_string()
+            format!("0 0 {w} 200")
         } else {
-            format!("0 0 900 {}", HH + n as f64 * RH + 30.0)
+            format!("0 0 {w} {}", HH + n as f64 * RH + 30.0)
         }
     };
 
@@ -442,7 +452,7 @@ fn TimelineView(state: State) -> impl IntoView {
     let zoom_in = move |_| { zoom_idx.update(|i| if *i > 0 { *i -= 1 }) };
 
     view! {
-        <div class="timeline-wrap">
+        <div class="timeline-wrap" node_ref=wrap_ref>
             <div class="timeline-controls">
                 <button on:click=zoom_out>"−"</button>
                 <span class="zoom-label">{move || {
@@ -461,11 +471,12 @@ fn TimelineView(state: State) -> impl IntoView {
                     let wt = ZOOM_LEVELS[zoom_idx.get() as usize];
                     let wp = wt * 0.75;
                     let wf = wt * 0.25;
+                    let w = svg_w.get();
+                    let tx = LX + 135.0;
+                    let tw = w - tx - 20.0;
                     if n == 0 {
-                        return view! { <text x="450" y="100" text-anchor="middle" fill="var(--muted)" font-size="14">"no scheduled agents"</text> }.into_any();
+                        return view! { <text x={(w / 2.0).to_string()} y="100" text-anchor="middle" fill="var(--muted)" font-size="14">"no scheduled agents"</text> }.into_any();
                     }
-                    let tx = TX;
-                    let tw = TW;
                     let t2x = move |t_epoch: f64| -> f64 { tx + (t_epoch - (now - wp)) / wt * tw };
 
                     // ── time axis ──
@@ -648,9 +659,8 @@ fn TimelineView(state: State) -> impl IntoView {
                         let click_rect = aid.map(|id| {
                             let id_sel = id.clone();
                             view! {
-                                <rect x="0" y={y.to_string()} width="900" height={RH.to_string()} fill="transparent"
-                                    on:click=move |ev| { ev.stop_propagation(); state.selected.set(Some(id_sel.clone())); state.editing_def.set(false); }
-                                    style="cursor:pointer" />
+                                <rect x="0" y={y.to_string()} width={w.to_string()} height={RH.to_string()} fill="transparent" class="clickable"
+                                    on:click=move |ev| { ev.stop_propagation(); state.selected.set(Some(id_sel.clone())); state.editing_def.set(false); } />
                             }.into_any()
                         });
 
@@ -673,7 +683,7 @@ fn TimelineView(state: State) -> impl IntoView {
                     let footer_y = HH + n as f64 * RH + 4.0;
                     let ns = nonscheduled();
                     let groups: Vec<_> = std::iter::once(
-                        view! { <line x1="0" y1={HH.to_string()} x2="900" y2={HH.to_string()} stroke="var(--border)" stroke-width="1" /> }.into_any()
+                        view! { <line x1="0" y1={HH.to_string()} x2={w.to_string()} y2={HH.to_string()} stroke="var(--border)" stroke-width="1" /> }.into_any()
                     ).chain(
                         axis.into_iter()
                     ).chain(
@@ -688,7 +698,7 @@ fn TimelineView(state: State) -> impl IntoView {
                     ).chain(
                         std::iter::once(
                             view! {
-                                <text x={TX.to_string()} y={footer_y.to_string()} fill="var(--muted)" font-size="11">
+                                <text x={tx.to_string()} y={footer_y.to_string()} fill="var(--muted)" font-size="11">
                                     {if ns > 0 { format!("{ns} on-demand agent(s) running") } else { String::new() }}
                                 </text>
                             }.into_any()
@@ -704,7 +714,7 @@ fn TimelineView(state: State) -> impl IntoView {
 #[component]
 fn Detail(state: State) -> impl IntoView {
     move || match state.selected.get() {
-        None => view! { <h3 class="muted">"select an agent to view its trace"</h3> }.into_any(),
+        None => view! { <h3 class="muted placeholder">"select an agent to view its trace"</h3> }.into_any(),
         Some(id) => {
             let lines = state.logs.get().get(&id).cloned().unwrap_or_default();
             let status = state.agents.get().into_iter().find(|a| a.id == id)
@@ -751,8 +761,8 @@ fn tasks_view(state: State) -> impl IntoView {
     view! {
         <main>
             <div class="left">
-                <div class="row" style="margin-bottom:8px">
-                    <h3 class="section" style="margin:0">"TASKS"</h3>
+                <div class="row toolbar">
+                    <h3 class="section">"TASKS"</h3>
                     <span class="spacer"></span>
                     <button class:active=move || state.filter.get() == TaskFilter::Active
                         on:click=move |_| state.filter.set(TaskFilter::Active)>"Active"</button>
@@ -805,7 +815,7 @@ fn task_card(state: State, t: Task) -> impl IntoView {
 #[component]
 fn TaskDetail(state: State) -> impl IntoView {
     move || match state.task_selected.get() {
-        None => view! { <h3 class="muted">"select a task to review"</h3> }.into_any(),
+        None => view! { <h3 class="muted placeholder">"select a task to review"</h3> }.into_any(),
         Some(id) => {
             let task = state.all_tasks().into_iter().find(|t| t.id == id);
             let status = task.as_ref().map(|t| t.status.clone()).unwrap_or_default();
@@ -850,13 +860,13 @@ fn TaskDetail(state: State) -> impl IntoView {
             };
 
             view! {
-                <div class="row" style="margin-bottom:8px">
-                    <h3 style="margin:0">{move || state.edit_title.get()}</h3>
+                <div class="row toolbar">
+                    <h3>{move || state.edit_title.get()}</h3>
                     <span class=format!("badge {status}")>{status.clone()}</span>
                     <span class="spacer"></span>
                     {is_proposed.then(|| view! {
-                        <button style="color:var(--green);border-color:var(--green)" on:click=accept>"Accept"</button>
-                        <button style="color:var(--red);border-color:var(--red)" on:click=reject>"Reject"</button>
+                        <button class="btn-accept" on:click=accept>"Accept"</button>
+                        <button class="btn-reject" on:click=reject>"Reject"</button>
                     })}
                     <button on:click=move |_| state.raw_mode.update(|r| *r = !*r)>
                         {move || if state.raw_mode.get() { "view" } else { "edit" }}</button>
@@ -870,7 +880,7 @@ fn TaskDetail(state: State) -> impl IntoView {
                         </div>
                         <textarea class="md-edit" prop:value=move || state.edit_body.get()
                             on:input=move |e| state.edit_body.set(event_target_value(&e))></textarea>
-                        <button style="margin-top:8px" on:click=move |_| {
+                        <button class="mt-sm" on:click=move |_| {
                             let id = id_save.clone();
                             spawn_local(async move {
                                 let _ = api::update_task(&id, &state.edit_title.get_untracked(),
