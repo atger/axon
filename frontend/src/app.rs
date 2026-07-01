@@ -334,42 +334,36 @@ fn agents_view(state: State) -> impl IntoView {
                                     <h3>{name.clone()}</h3>
                                     <span class="spacer"></span>
                                     {ro.then(|| view! { <span class="badge sys">"read-only"</span> })}
-                                    <button on:click=move |_| state.raw_mode_def.set(false)>"View"</button>
-                                    <button on:click=move |_| { state.editing_def.set(false); }>"Close"</button>
+                                    <button on:click=move |_| state.raw_mode_def.set(false)>"Back"</button>
                                 </div>
                                 <textarea class="md-edit" prop:value=move || state.ed_md.get()
                                     on:input=move |e| state.ed_md.set(event_target_value(&e))></textarea>
                                 {(!ro).then(|| view! {
                                     <div class="row mt-sm">
                                         <button on:click=move |_| { save(); }>"Save"</button>
-                                        <button on:click=move |_| { state.raw_mode_def.set(false); state.editing_def.set(false); }>"Cancel"</button>
+                                        {state.ed_def.get().map(|d| !d.id.is_empty()).unwrap_or(false).then(|| view! {
+                                            <button class="danger" on:click=del>"Delete"</button>
+                                        })}
+                                        <button on:click=move |_| { state.raw_mode_def.set(false); }>"Cancel"</button>
                                     </div>
                                 })}
                             }.into_any()
                         } else {
                             view! {
                                 <div class="row toolbar">
-                                    <h3>{name.clone()}</h3>
                                     <span class="spacer"></span>
-                                    {ro.then(|| view! { <span class="badge sys">"read-only"</span> })}
                                     <button on:click=move |_| state.raw_mode_def.set(true)>"Edit"</button>
-                                    <button on:click=move |_| { state.editing_def.set(false); }>"Close"</button>
                                 </div>
-                                <div class="md-preview" inner_html=move || render_agent_md(&state.ed_md.get())></div>
-                                <div class="spawn-section">
-                                    {(!ro).then(|| view! {
-                                        <div class="row">
-                                            <button on:click=move |_| state.raw_mode_def.set(true)>"Edit YAML"</button>
-                                            {state.ed_def.get().map(|d| !d.id.is_empty()).unwrap_or(false).then(|| view! {
-                                                <button class="danger" on:click=del>"Delete"</button>
-                                            })}
+                                <div class="spawn-center">
+                                    <h2 style="margin-bottom: 24px; color: var(--accent);">{name.clone()}</h2>
+                                    <div class="spawn-section" style="border:none; margin-top:0; padding-top:0; width: 100%; max-width: 500px;">
+                                        <div class="field">
+                                            <textarea node_ref=spawn_input
+                                                on:input=move |e| state.spawn_task.set(event_target_value(&e))
+                                                placeholder=move || state.ed_def.get().and_then(|d| d.task_hint.clone()).unwrap_or_else(|| "Describe a task for this agent…".to_string())
+                                                style="min-height: 120px;"></textarea>
+                                            <button class="mt-sm" on:click=do_spawn style="width: 100%; height: 40px; font-weight: bold;">"Spawn"</button>
                                         </div>
-                                    })}
-                                    <div class="field mt-sm">
-                                        <textarea node_ref=spawn_input
-                                            on:input=move |e| state.spawn_task.set(event_target_value(&e))
-                                            placeholder=move || state.ed_def.get().and_then(|d| d.task_hint.clone()).unwrap_or_else(|| "Describe a task for this agent…".to_string())></textarea>
-                                        <button class="mt-sm" on:click=do_spawn>"Spawn"</button>
                                     </div>
                                 </div>
                             }.into_any()

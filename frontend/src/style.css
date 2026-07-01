@@ -172,6 +172,7 @@ nav button.active { border-color:var(--accent); color:var(--accent); }
 .timeline-controls button { padding:1px 10px; font-size:13px; line-height:1.4; min-width:28px; }
 .timeline-controls button:disabled { opacity:0.3; cursor:default; }
 .zoom-label { font-size:11px; color:var(--muted); min-width:36px; text-align:center; }
+.spawn-center { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; }
 
 @media (max-width: 750px) {
   main { grid-template-columns:1fr; grid-template-rows:auto 1fr; overflow:hidden; }
