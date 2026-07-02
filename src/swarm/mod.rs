@@ -168,7 +168,7 @@ pub struct Swarm {
     /// Maps a scheduled def id → (running agent id, config signature).
     sched_index: Mutex<HashMap<String, (String, String)>>,
     agent_history: Mutex<VecDeque<HistoricAgent>>,
-    mcp_tools: RwLock<Vec<Arc<dyn ToolT>>>,
+    mcp_tools: RwLock<Vec<(String, Arc<dyn ToolT>)>>,
     #[allow(dead_code)]
     mcp_clients: RwLock<Vec<Arc<ClientRuntime>>>,
     _env: Mutex<Environment>,
@@ -217,23 +217,20 @@ impl Swarm {
         swarm.clone().spawn_event_pump(event_stream);
         swarm.clone().spawn_pump(spawn_rx);
 
-        // Load MCP tools in the background so failures/slow startup don't block the dashboard.
-        let swarm_clone = swarm.clone();
-        tokio::spawn(async move {
-            let config = crate::config::AxonConfig::load();
-            for (name, server) in &config.mcp_servers {
-                match crate::tools::mcp::load_raw_mcp_tools(name, &server.command, &server.args, &server.env).await {
-                    Ok((tools, client)) => {
-                        let mut mcp_list = swarm_clone.mcp_tools.write().await;
-                        for t in tools {
-                            mcp_list.push(Arc::new(tools::McpSwarmTool::new(t)));
-                        }
-                        swarm_clone.mcp_clients.write().await.push(client);
+        // Load MCP tools so they're available immediately when the dashboard starts.
+        let config = crate::config::AxonConfig::load();
+        for (name, server) in &config.mcp_servers {
+            match crate::tools::mcp::load_raw_mcp_tools(name, &server.command, &server.args, &server.env).await {
+                Ok((tools, client)) => {
+                    let mut mcp_list = swarm.mcp_tools.write().await;
+                    for t in tools {
+                        mcp_list.push((name.to_string(), Arc::new(tools::McpSwarmTool::new(t))));
                     }
-                    Err(e) => eprintln!("Warning: swarm failed to load MCP tools for {name}: {e}"),
+                    swarm.mcp_clients.write().await.push(client);
                 }
+                Err(e) => eprintln!("Warning: swarm failed to load MCP tools for {name}: {e}"),
             }
-        });
+        }
 
         // Start any proactive (scheduled) user agents saved in the DB.
         swarm.resync_schedules().await;
@@ -273,6 +270,10 @@ impl Swarm {
 
     pub fn ollama_url(&self) -> &str {
         &self.ollama_url
+    }
+
+    pub async fn mcp_tools(&self) -> Vec<(String, Arc<dyn ToolT>)> {
+        self.mcp_tools.read().await.clone()
     }
 
     // -- agent construction ------------------------------------------------
@@ -393,7 +394,7 @@ impl Swarm {
             perpetual: false,
             def_name: Some(def.name),
             spawn_tx: Some(self.spawn_tx.clone()),
-            mcp_tools: self.mcp_tools.read().await.clone(),
+            mcp_tools: self.mcp_tools.read().await.iter().map(|(_, t)| t.clone()).collect(),
         })
         .await?;
         self.publish_to(&id, task).await?;
@@ -486,7 +487,7 @@ impl Swarm {
             perpetual: true,
             def_name: Some(def.name.clone()),
             spawn_tx: Some(self.spawn_tx.clone()),
-            mcp_tools: self.mcp_tools.read().await.clone(),
+            mcp_tools: self.mcp_tools.read().await.iter().map(|(_, t)| t.clone()).collect(),
         })
         .await?;
         self.scheduled

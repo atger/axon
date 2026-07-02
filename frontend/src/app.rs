@@ -7,7 +7,7 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde_json::Value;
 
-use crate::api::{self, AgentDef, AgentInfo, SwarmEvent, Task, TeamWithAgents};
+use crate::api::{self, AgentDef, AgentInfo, SwarmEvent, Task, TeamWithAgents, McpTool};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LogLine {
@@ -58,6 +58,10 @@ struct State {
     editing_mcp: RwSignal<bool>,
     mcp_json_buffer: RwSignal<String>,
     settings_opt: RwSignal<SettingsOption>,
+    /// Visibility of the tools sidebar in the spawn window
+    tools_sidebar_visible: RwSignal<bool>,
+    /// Available MCP tools from connected servers
+    mcp_tools: RwSignal<Vec<McpTool>>,
     /// Completed cycles saved per agent so they remain visible even after
     /// cycle_started is updated on the next publish.
     prev_cycles: RwSignal<HashMap<String, Vec<(String, String, String)>>>,
@@ -122,6 +126,8 @@ pub fn App() -> impl IntoView {
         editing_mcp: RwSignal::new(false),
         mcp_json_buffer: RwSignal::new(String::new()),
         settings_opt: RwSignal::new(SettingsOption::MCP),
+        tools_sidebar_visible: RwSignal::new(false),
+        mcp_tools: RwSignal::new(Vec::new()),
         prev_cycles: RwSignal::new(HashMap::new()),
     };
 
@@ -138,8 +144,10 @@ pub fn App() -> impl IntoView {
             state.teams.set(teams);
         }
         state.models.set(api::fetch_models().await);
+        state.mcp_tools.set(api::fetch_mcp_tools().await);
         loop {
             state.agents.set(api::fetch_agents().await);
+            state.mcp_tools.set(api::fetch_mcp_tools().await);
             gloo_timers::future::TimeoutFuture::new(3000).await;
         }
     });
@@ -373,6 +381,10 @@ fn agents_view(state: State) -> impl IntoView {
                                     </select>
                                     <span class="spacer"></span>
                                     <button on:click=move |_| state.raw_mode_def.set(true)>"Edit"</button>
+                                    <button on:click=move |_| state.tools_sidebar_visible.update(|v| *v = !*v)
+                                        class:active=move || state.tools_sidebar_visible.get()>
+                                        "Tools"
+                                    </button>
                                 </div>
                                 <div class="spawn-center">
                                     <h2 style="margin-bottom: 24px; color: var(--accent);">{name.clone()}</h2>
@@ -430,6 +442,7 @@ fn agents_view(state: State) -> impl IntoView {
                 }}
             </div>
         </main>
+        {move || state.tools_sidebar_visible.get().then(|| view! { <ToolsSidebar state=state /> })}
     }
 }
 
@@ -847,6 +860,226 @@ fn Detail(state: State) -> impl IntoView {
             }
             .into_any()
         }
+    }
+}
+
+// --------------------------------------------------------------------------
+// Tools sidebar for agent spawn window
+// --------------------------------------------------------------------------
+
+#[component]
+fn ToolsSidebar(state: State) -> impl IntoView {
+    let builtin_tools = vec![
+        ("write_file", "Write File", "Create or overwrite files"),
+        ("read_file", "Read File", "Read file contents"),
+        ("delete_file", "Delete File", "Delete files from the filesystem"),
+        ("run_command", "Run Command", "Execute shell commands"),
+        ("web_search", "Web Search", "Search the web for information"),
+        ("add_task", "Add Task", "Add tasks to the task queue"),
+        ("spawn_agent", "Spawn Agent", "Spawn other agents"),
+    ];
+
+    let mcp_tools = state.mcp_tools.get();
+
+    let toggle_tool = move |tool_name: String| {
+        if let Some(mut def) = state.ed_def.get() {
+            let mut tools = def.tools.clone();
+            if tools.contains(&tool_name) {
+                tools.retain(|t| t != &tool_name);
+            } else {
+                tools.push(tool_name);
+            }
+            def.tools = tools.clone();
+            let id = def.id.clone();
+            state.ed_def.set(Some(def.clone()));
+            state.ed_md.set(agent_def_to_md(&def));
+            if !id.is_empty() {
+                spawn_local(async move {
+                    let _ = api::update_def(&id, &def).await;
+                    state.teams.set(api::fetch_teams().await);
+                });
+            }
+        }
+    };
+
+    let toggle_group_tools = move |server_name: String, select: bool| {
+        if let Some(mut def) = state.ed_def.get() {
+            let mut tools = def.tools.clone();
+            let mcp_tools = state.mcp_tools.get();
+            let group_tool_names: Vec<String> = mcp_tools.into_iter()
+                .filter(|t| t.server_name == server_name)
+                .map(|t| t.name)
+                .collect();
+            
+            for name in group_tool_names {
+                if select {
+                    if !tools.contains(&name) {
+                        tools.push(name);
+                    }
+                } else {
+                    tools.retain(|t| t != &name);
+                }
+            }
+            
+            def.tools = tools.clone();
+            let id = def.id.clone();
+            state.ed_def.set(Some(def.clone()));
+            state.ed_md.set(agent_def_to_md(&def));
+            if !id.is_empty() {
+                spawn_local(async move {
+                    let _ = api::update_def(&id, &def).await;
+                    state.teams.set(api::fetch_teams().await);
+                });
+            }
+        }
+    };
+
+    let expanded_groups = RwSignal::new(std::collections::HashSet::<String>::new());
+
+    view! {
+        <div class="tools-sidebar-overlay" on:click=move |_| state.tools_sidebar_visible.set(false)>
+            <div class="tools-sidebar" on:click=move |ev| ev.stop_propagation()>
+                <div class="tools-sidebar-header">
+                    <h3>"Available Tools"</h3>
+                    <button on:click=move |_| state.tools_sidebar_visible.set(false)>"✕"</button>
+                </div>
+                <div class="tools-sidebar-content">
+                    <div class="tool-section">
+                        <h4 class="tool-section-title">"Built-in Tools"</h4>
+                        {builtin_tools.into_iter().map(|(id, name, desc)| {
+                            let is_selected = move || state.ed_def.get().map(|d| d.tools.contains(&id.to_string())).unwrap_or(false);
+                            view! {
+                                <label class="tool-item" class:selected=is_selected>
+                                    <input type="checkbox"
+                                        checked=is_selected
+                                        on:change=move |_| toggle_tool(id.to_string()) />
+                                    <div class="tool-info">
+                                        <span class="tool-name">{name}</span>
+                                        <span class="tool-desc">{desc}</span>
+                                    </div>
+                                </label>
+                            }
+                        }).collect_view()}
+                    </div>
+                    {if !mcp_tools.is_empty() {
+                        let mut grouped_mcp: std::collections::BTreeMap<String, Vec<api::McpTool>> = std::collections::BTreeMap::new();
+                        for tool in mcp_tools {
+                            let server = if tool.server_name.is_empty() { "mcp".to_string() } else { tool.server_name.clone() };
+                            grouped_mcp.entry(server).or_default().push(tool);
+                        }
+
+                        view! {
+                            <div class="tool-section">
+                                <h4 class="tool-section-title">"MCP Tools"</h4>
+                                {grouped_mcp.into_iter().map(|(server_name, group_tools)| {
+                                    let server_name_for_arrow = server_name.clone();
+                                    let server_name_for_open = server_name.clone();
+                                    let server_name_for_open2 = server_name.clone();
+                                    
+                                    let is_expanded_for_arrow = move || expanded_groups.get().contains(&server_name_for_open);
+                                    let is_expanded_for_children = move || expanded_groups.get().contains(&server_name_for_open2);
+                                    
+                                    let toggle_expand = {
+                                        let server_name = server_name.clone();
+                                        move |ev: leptos::ev::MouseEvent| {
+                                            ev.stop_propagation();
+                                            expanded_groups.update(|set| {
+                                                if set.contains(&server_name) {
+                                                    set.remove(&server_name);
+                                                } else {
+                                                    set.insert(server_name.clone());
+                                                }
+                                            });
+                                        }
+                                    };
+
+                                    let group_tools_for_all = group_tools.clone();
+                                    let is_all_selected = move || {
+                                        let tools_in_def = state.ed_def.get().map(|d| d.tools.clone()).unwrap_or_default();
+                                        group_tools_for_all.iter().all(|t| tools_in_def.contains(&t.name))
+                                    };
+
+                                    let group_tools_for_any = group_tools.clone();
+                                    let group_tools_for_all_ind = group_tools.clone();
+                                    let is_indeterminate = move || {
+                                        let tools_in_def = state.ed_def.get().map(|d| d.tools.clone()).unwrap_or_default();
+                                        let any = group_tools_for_any.iter().any(|t| tools_in_def.contains(&t.name));
+                                        let all = group_tools_for_all_ind.iter().all(|t| tools_in_def.contains(&t.name));
+                                        any && !all
+                                    };
+
+                                    let group_tools_for_count = group_tools.clone();
+                                    let selected_count = move || {
+                                        let tools_in_def = state.ed_def.get().map(|d| d.tools.clone()).unwrap_or_default();
+                                        group_tools_for_count.iter().filter(|t| tools_in_def.contains(&t.name)).count()
+                                    };
+
+                                    let group_tools_for_toggle = group_tools.clone();
+                                    let toggle_all_in_group = {
+                                        let server_name = server_name.clone();
+                                        move |ev: leptos::ev::Event| {
+                                            ev.stop_propagation();
+                                            let tools_in_def = state.ed_def.get().map(|d| d.tools.clone()).unwrap_or_default();
+                                            let all_selected = group_tools_for_toggle.iter().all(|t| tools_in_def.contains(&t.name));
+                                            let target_state = !all_selected;
+                                            toggle_group_tools(server_name.clone(), target_state);
+                                        }
+                                    };
+
+                                    let group_tools_for_children = group_tools.clone();
+
+                                    view! {
+                                        <div class="tool-group">
+                                            <div class="tool-group-header" on:click=toggle_expand>
+                                                <div class="tool-group-title">
+                                                    <span class="tool-group-arrow">
+                                                        {move || if is_expanded_for_arrow() { "▼" } else { "▶" }}
+                                                    </span>
+                                                    <span>{server_name_for_arrow.clone()} " (" {selected_count} ")"</span>
+                                                </div>
+                                                <input type="checkbox"
+                                                    checked=is_all_selected
+                                                    prop:indeterminate=is_indeterminate
+                                                    on:click=move |ev| ev.stop_propagation()
+                                                    on:change=toggle_all_in_group />
+                                            </div>
+                                            {move || is_expanded_for_children().then(|| {
+                                                view! {
+                                                    <div class="tool-group-children">
+                                                        {group_tools_for_children.clone().into_iter().map(|tool| {
+                                                            let id = tool.name.clone();
+                                                            let name = tool.name.clone();
+                                                            let desc = tool.description.clone();
+                                                            let id_for_check = id.clone();
+                                                            let id_for_toggle = id.clone();
+                                                            let is_selected = move || state.ed_def.get().map(|d| d.tools.contains(&id)).unwrap_or(false);
+                                                            let is_checked = move || state.ed_def.get().map(|d| d.tools.contains(&id_for_check)).unwrap_or(false);
+                                                            view! {
+                                                                <label class="tool-item" class:selected=is_selected>
+                                                                    <input type="checkbox"
+                                                                        checked=is_checked
+                                                                        on:change=move |_| toggle_tool(id_for_toggle.clone()) />
+                                                                    <div class="tool-info">
+                                                                        <span class="tool-name">{name}</span>
+                                                                        <span class="tool-desc">{desc}</span>
+                                                                    </div>
+                                                                </label>
+                                                            }
+                                                        }).collect_view()}
+                                                    </div>
+                                                }
+                                            })}
+                                        </div>
+                                    }
+                                }).collect_view()}
+                            </div>
+                        }.into_any()
+                    } else {
+                        view! {}.into_any()
+                    }}
+                </div>
+            </div>
+        </div>
     }
 }
 

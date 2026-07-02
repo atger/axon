@@ -354,6 +354,23 @@ pub async fn replace_all_mcp(servers: HashMap<String, McpServerConfig>) -> Resul
     Ok(())
 }
 
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct McpTool {
+    pub name: String,
+    pub description: String,
+    #[serde(default)]
+    pub server_name: String,
+    #[serde(default)]
+    pub args_schema: serde_json::Value,
+}
+
+pub async fn fetch_mcp_tools() -> Vec<McpTool> {
+    match Request::get("/api/mcp/tools").send().await {
+        Ok(resp) => resp.json().await.unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Build the absolute `ws(s)://host/ws` URL from the current page location.
 fn ws_url() -> String {
     let loc = web_sys::window().expect("window").location();

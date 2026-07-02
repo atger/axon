@@ -26,6 +26,7 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 use crate::swarm::{Swarm, teams as defstore};
+use autoagents::core::tool::ToolT;
 
 #[derive(rust_embed::RustEmbed)]
 #[folder = "frontend/dist"]
@@ -46,6 +47,7 @@ pub async fn run_server(swarm: Arc<Swarm>, host: String, port: u16) -> Result<()
         .route("/api/models", get(list_models).post(set_model))
         .route("/api/mcp", get(list_mcp).post(upsert_mcp).put(replace_all_mcp))
         .route("/api/mcp/:id", delete(delete_mcp))
+        .route("/api/mcp/tools", get(list_mcp_tools))
         .route("/api/tasks", get(tasks::list))
         .route("/api/tasks/history", get(tasks::history))
         .route("/api/tasks/:id", get(tasks::get).put(tasks::update))
@@ -240,6 +242,22 @@ async fn replace_all_mcp(
         )
             .into_response(),
     }
+}
+
+async fn list_mcp_tools(State(swarm): State<Arc<Swarm>>) -> Json<serde_json::Value> {
+    let tools = swarm.mcp_tools().await;
+    let tool_list: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|(server_name, t)| {
+            json!({
+                "name": t.name(),
+                "description": t.description(),
+                "server_name": server_name,
+                "args_schema": t.args_schema(),
+            })
+        })
+        .collect();
+    Json(json!(tool_list))
 }
 
 // ---------------------------------------------------------------------------

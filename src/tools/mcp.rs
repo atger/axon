@@ -12,6 +12,7 @@ use super::{Tool, ToolError};
 pub struct McpTool {
     name: String,
     description: String,
+    server_name: String,
     client: Arc<ClientRuntime>,
 }
 
@@ -30,8 +31,12 @@ pub struct MyClientHandler;
 impl ClientHandler for MyClientHandler {}
 
 impl McpTool {
-    pub fn new(name: String, description: String, client: Arc<ClientRuntime>) -> Self {
-        Self { name, description, client }
+    pub fn new(name: String, description: String, server_name: String, client: Arc<ClientRuntime>) -> Self {
+        Self { name, description, server_name, client }
+    }
+
+    pub fn server_name(&self) -> &str {
+        &self.server_name
     }
 }
 
@@ -128,7 +133,7 @@ pub async fn load_raw_mcp_tools(
     eprintln!("Found {} tools from MCP server '{name}'", tool_list.tools.len());
     for tool in tool_list.tools {
         let desc = tool.description.unwrap_or_default();
-        tools.push(McpTool::new(tool.name, desc, client_arc.clone()));
+        tools.push(McpTool::new(tool.name, desc, name.to_string(), client_arc.clone()));
     }
 
     Ok((tools, client_arc))
